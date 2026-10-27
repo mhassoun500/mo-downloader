@@ -31,9 +31,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 FROZEN = bool(getattr(sys, "frozen", False))
-BACKGROUND = "--background" in sys.argv
+PROTOCOL = "mo-downloader"
+# started in the background (with the computer) or by the browser extension through mo-downloader://
+BACKGROUND = "--background" in sys.argv or any(a.lower().startswith(PROTOCOL + ":") for a in sys.argv[1:])
 DEFAULT_PORT = int(os.environ.get("MD_PORT", 8765))
 SYSTEM = platform.system()
 
@@ -1044,9 +1046,46 @@ def public_job(j):
     return {k: v for k, v in j.items() if not k.startswith("_")}
 
 
+def extension_source():
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    for cand in (base / "browser-extension", Path(__file__).parent.parent / "browser-extension"):
+        if (cand / "manifest.json").exists():
+            return cand
+    return None
+
+
+def export_extension():
+    """Copy the browser extension to a normal folder the browser's 'Load unpacked' dialog can reach."""
+    src = extension_source()
+    if not src:
+        raise ValueError("ملفات إضافة المتصفح غير موجودة في هذه النسخة.")
+    dst = Path.home() / "MO Downloader Extension"
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
+    return dst
+
+
+def ext_download(req):
+    url = str(req.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("هذه الصفحة لا تحتوي رابطاً يمكن تنزيله.")
+    preset = str(req.get("preset") or "best")
+    if preset not in ("best", "audio") and not preset.isdigit():
+        preset = "best"
+    r = {
+        "url": url, "mode": "preset", "preset": preset, "container": "mp4",
+        "audio_convert": "mp3" if preset == "audio" else "original", "audio_quality": "0",
+        "outdir": SETTINGS["outdir"], "meta": True, "title": (req.get("title") or url)[:200],
+        "playlist": "youtube.com/playlist" in url,
+    }
+    q = {"best": "أفضل جودة", "audio": "صوت MP3"}.get(preset, f"{preset}p")
+    return {"id": new_job(r, label=f"من المتصفح · {q}", source="ext", source_label="من المتصفح")}
+
+
 # ---------------------------------------------------------------- web server
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MODownloader/2.0"
+    server_version = "MODownloader/2.1"
 
     def log_message(self, *_):
         pass
@@ -1063,12 +1102,75 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self):
         return self.headers.get("X-Token") == TOKEN
 
+    def _host_ok(self):
+        # blocks DNS-rebinding: a web page can never reach us under its own host name
+        port = self.server.server_address[1]
+        return self.headers.get("Host", "") in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+    def _ext_origin(self):
+        """Requests from our browser extension. Web pages can't send the X-MO-Ext header without a CORS
+        preflight, and we only answer preflights coming from extension origins."""
+        origin = self.headers.get("Origin") or ""
+        ok_origin = not origin or origin.startswith(("chrome-extension://", "moz-extension://", "safari-web-extension://"))
+        return ok_origin and self.headers.get("X-MO-Ext") == "1"
+
+    def _cors(self):
+        origin = self.headers.get("Origin") or ""
+        if origin.startswith(("chrome-extension://", "moz-extension://", "safari-web-extension://")):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Headers", "X-MO-Ext, Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST")
+            self.send_header("Vary", "Origin")
+
+    def _send_ext(self, code, body):
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self._cors()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_OPTIONS(self):  # noqa: N802
+        origin = self.headers.get("Origin") or ""
+        if (self._host_ok() and urlparse(self.path).path.startswith("/api/ext/")
+                and origin.startswith(("chrome-extension://", "moz-extension://", "safari-web-extension://"))):
+            self.send_response(204)
+            self._cors()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self._send(403, {"error": "forbidden"})
+
+    def _ext_api(self, method, u):
+        if not self._ext_origin():
+            return self._send(403, {"error": "forbidden"})
+        try:
+            if u.path == "/api/ext/status":
+                return self._send_ext(200, {"app": APP_NAME, "version": APP_VERSION,
+                                            "url": f"http://127.0.0.1:{self.server.server_address[1]}/"})
+            if u.path == "/api/ext/jobs":
+                with JOBS_LOCK:
+                    jobs = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)[:6]
+                    keep = ("id", "title", "status", "stage", "percent", "label", "source", "error")
+                    return self._send_ext(200, {"jobs": [{k: j.get(k) for k in keep} for j in jobs]})
+            if method == "POST" and u.path == "/api/ext/download":
+                return self._send_ext(200, ext_download(self._body()))
+            return self._send_ext(404, {"error": "not found"})
+        except Exception as e:  # noqa: BLE001
+            return self._send_ext(400, {"error": clean_err(e)})
+
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
     def do_GET(self):  # noqa: N802
         u = urlparse(self.path)
+        if not self._host_ok():
+            return self._send(403, {"error": "forbidden"})
+        if u.path.startswith("/api/ext/"):
+            return self._ext_api("GET", u)
         if u.path in ("/logo.png", "/favicon.ico"):
             return self._send(200, LOGO_PNG, "image/png")
         if u.path == "/api/ping":
@@ -1088,7 +1190,7 @@ class Handler(BaseHTTPRequestHandler):
                 "app": APP_VERSION, "ytdlp": ENGINE["version"], "pending": ENGINE["pending"], "frozen": FROZEN,
                 "ffmpeg": bool(FFMPEG), "js": list(JS_RUNTIMES.keys()), "cookie_file": COOKIE_FILE.exists(),
                 "settings": {k: v for k, v in SETTINGS.items() if k != "engine_checked"},
-                "system": SYSTEM,
+                "system": SYSTEM, "has_extension": bool(extension_source()),
             })
         if u.path == "/api/history":
             return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 300)))
@@ -1098,6 +1200,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
+        if not self._host_ok():
+            return self._send(403, {"error": "forbidden"})
+        u = urlparse(self.path)
+        if u.path.startswith("/api/ext/"):
+            return self._ext_api("POST", u)
         if not self._authorized():
             return self._send(403, {"error": "forbidden"})
         try:
@@ -1142,6 +1249,10 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/open":
                 open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")))
                 return self._send(200, {"ok": True})
+            if p == "/api/ext_folder":
+                dst = export_extension()
+                open_path(dst)
+                return self._send(200, {"ok": True, "path": str(dst)})
             if p == "/api/open_url":
                 u = str(req.get("url") or "")
                 if u.startswith(("http://", "https://")):
@@ -1601,6 +1712,26 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       </div>
       <div id="cookiehelp" class="msg info">لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.</div>
       <div id="cmsg" class="msg hidden"></div>
+    </section>
+
+    <section class="card" id="extcard">
+      <h2>إضافة المتصفح</h2>
+      <p class="sub">تُظهر زر تنزيل فوق أي فيديو في المتصفح، وزراً في شريط الأدوات، وخياراً في قائمة الزر الأيمن، بدون نسخ أي رابط.</p>
+      <ol class="sub" style="margin:10px 0 0;padding-inline-start:20px;line-height:2">
+        <li>اضغط «تجهيز مجلد الإضافة» بالأسفل، فيُنشأ مجلد باسم <span class="ltr">MO Downloader Extension</span> ويُفتح.</li>
+        <li>في Chrome أو Edge أو Brave أو Opera افتح صفحة الإضافات بكتابة هذا العنوان في شريط العنوان:
+          <span class="ltr" style="background:var(--chip);padding:1px 8px;border-radius:6px" id="extUrl">chrome://extensions</span>
+          <button class="small ghost" id="extCopy">نسخ</button>
+          <span class="help">(في Edge: <span class="ltr">edge://extensions</span>)</span></li>
+        <li>فعّل «وضع المطوّر» (Developer mode) من أعلى الصفحة.</li>
+        <li>اضغط «تحميل إضافة غير مُعبأة» (Load unpacked) واختر المجلد من الخطوة الأولى.</li>
+        <li>ثبّت أيقونة MO في شريط الأدوات من زر الإضافات (قطعة البازل).</li>
+      </ol>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="extExport">تجهيز مجلد الإضافة</button>
+        <span class="sub" id="extPath"></span>
+      </div>
+      <p class="help">لا تحذف المجلد بعد التثبيت، فالمتصفح يقرأ الإضافة منه. وعند تحديث الأداة اضغط «تجهيز مجلد الإضافة» مرة أخرى ثم زر التحديث في صفحة الإضافات.</p>
     </section>
 
     <section class="card">
@@ -2106,7 +2237,23 @@ $("quit").onclick = async () => {
   clearTimeout(pollTimer);
   document.querySelector(".wrap").innerHTML = '<div class="card" style="margin-top:40px;text-align:center"><h2 style="margin:0 0 6px">تم إيقاف MO Downloader</h2><p class="sub">يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.</p></div>';
 };
-loadStatus().then(() => { showPanel(store.get("md_panel", "dl")); loadSubs(); });
+$("extExport").onclick = async () => {
+  try { const r = await api("/api/ext_folder", {}); $("extPath").textContent = "✓ " + r.path; }
+  catch (e) { $("extPath").textContent = e.message; }
+};
+$("extCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("extUrl").textContent); $("extCopy").textContent = "✓ نُسخ"; } catch (e) {}
+  setTimeout(() => $("extCopy").textContent = "نسخ", 1500);
+};
+const startUrl = new URLSearchParams(location.search).get("url");  // opened from the browser extension
+loadStatus().then(() => {
+  $("extcard").classList.toggle("hidden", !S.status.has_extension);
+  if (startUrl) {
+    history.replaceState(null, "", "/");
+    showPanel("dl"); $("url").value = startUrl; analyze();
+  } else showPanel(store.get("md_panel", "dl"));
+  loadSubs();
+});
 poll();
 $("url").focus();
 </script>

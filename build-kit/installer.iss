@@ -48,6 +48,12 @@ Type: filesandordirs; Name: "{app}\_internal"
 Name: "{autoprograms}\MO Downloader"; Filename: "{app}\MO Downloader.exe"
 Name: "{autodesktop}\MO Downloader"; Filename: "{app}\MO Downloader.exe"; Tasks: desktopicon
 
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\mo-downloader"; ValueType: string; ValueName: ""; ValueData: "URL:MO Downloader"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\mo-downloader"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\mo-downloader\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\MO Downloader.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\mo-downloader\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\MO Downloader.exe"" ""%1"""
+
 [Run]
 Filename: "{app}\MO Downloader.exe"; Description: "{cm:LaunchProgram,MO Downloader}"; Flags: nowait postinstall skipifsilent
 

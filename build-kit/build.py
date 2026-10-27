@@ -61,6 +61,7 @@ def main():
         sys.executable, "-m", "PyInstaller", str(APP), "--noconfirm", "--clean", "--onedir",
         "--name", NAME, "--distpath", WORK / "dist", "--workpath", WORK / "work", "--specpath", WORK,
         "--add-data", f"{WORK / 'engine_version.json'}{os.pathsep}.",
+        "--add-data", f"{ROOT / 'browser-extension'}{os.pathsep}browser-extension",
         "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",
         "--add-binary", f"{deno_bin}{os.pathsep}deno_bin",
         "--collect-data", "certifi", "--hidden-import", "certifi",
@@ -68,7 +69,7 @@ def main():
     if SYSTEM == "Windows":
         args += ["--windowed", "--icon", ICO]
     elif SYSTEM == "Darwin":
-        args += ["--windowed", "--icon", ICNS, "--osx-bundle-identifier", "local.mo.downloader"]
+        args += ["--windowed", "--icon", ICNS, "--osx-bundle-identifier", "local.mo.downloader", "--argv-emulation"]
     run(*args)
 
     out = WORK / "dist"
@@ -90,7 +91,8 @@ def main():
         with open(info, "rb") as f:
             pl = plistlib.load(f)
         pl.update(LSUIElement=True, CFBundleDisplayName=NAME, CFBundleShortVersionString=versions["app"],
-                  CFBundleVersion=versions["app"], NSHighResolutionCapable=True)
+                  CFBundleVersion=versions["app"], NSHighResolutionCapable=True,
+                  CFBundleURLTypes=[{"CFBundleURLName": "MO Downloader", "CFBundleURLSchemes": ["mo-downloader"]}])
         with open(info, "wb") as f:
             plistlib.dump(pl, f)
         # ad-hoc sign every executable inside (ffmpeg, deno, libraries), then the app (required on Apple Silicon)

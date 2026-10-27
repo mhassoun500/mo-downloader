@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MO Downloader</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<style>
+:root{
+  --bg:#f4f1ea; --panel:#fffdf8; --ink:#1d1b16; --muted:#6b665b; --line:#e3ddcf;
+  --accent:#0f6b5c; --accent-ink:#ffffff; --accent-soft:#dcefe9; --bad:#b3261e; --bad-soft:#f6e0dd;
+  --warn:#9a5b00; --warn-soft:#fbefd9; --chip:#efe9dc; --shadow:0 1px 2px rgba(0,0,0,.05),0 8px 24px rgba(40,30,10,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#14130f; --panel:#1d1b16; --ink:#ece7dc; --muted:#a39d8f; --line:#332f27;
+    --accent:#3fb59c; --accent-ink:#0c1a16; --accent-soft:#1d332d; --bad:#ef7b72; --bad-soft:#3a1f1c;
+    --warn:#f0b35a; --warn-soft:#3a2d17; --chip:#2a2720; --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Segoe UI","Noto Naskh Arabic","Noto Sans Arabic",Tahoma,system-ui,sans-serif;font-size:15px;line-height:1.6}
+.wrap{max-width:1060px;margin:0 auto;padding:24px 16px 64px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+h1.brand{font-size:27px;margin:0;font-weight:800;display:flex;align-items:center;gap:10px}
+h1.brand img{border-radius:10px} h1.brand b{color:var(--accent);font-weight:800}
+.sub{color:var(--muted);margin:2px 0 0;font-size:14px}
+.status{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:12px;padding:3px 10px;border-radius:999px;background:var(--chip);color:var(--muted)}
+.pill.ok{background:var(--accent-soft);color:var(--accent)} .pill.bad{background:var(--bad-soft);color:var(--bad)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+nav{display:flex;gap:4px;margin:0 0 14px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:5px;overflow-x:auto}
+nav button{border:none;background:none;border-radius:10px;padding:8px 14px;color:var(--muted);font-weight:600;flex:none}
+nav button.on{background:var(--accent);color:var(--accent-ink)}
+nav .n{font-size:11.5px;background:var(--chip);color:var(--muted);border-radius:999px;padding:0 7px;margin-inline-start:5px}
+nav button.on .n{background:rgba(255,255,255,.25);color:inherit}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px}
+.card+.card{margin-top:16px}
+.card h2{font-size:18px;margin:0 0 4px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+input[type=text],input[type=number],select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);
+  border-radius:10px;padding:9px 12px;min-width:0}
+textarea{width:100%;min-height:150px;direction:ltr;text-align:left;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13.5px}
+input.ltr,#url{direction:ltr;text-align:left}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:9px 14px;white-space:nowrap}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.5;cursor:default}
+button.ghost{background:transparent} button.small{padding:4px 10px;font-size:13px}
+button.danger{color:var(--bad)} button.danger.armed{background:var(--bad);color:#fff;border-color:var(--bad)}
+.msg{margin-top:12px;padding:10px 12px;border-radius:10px;white-space:pre-wrap;font-size:14px}
+.msg.err{background:var(--bad-soft);color:var(--bad)} .msg.info{background:var(--chip);color:var(--muted)}
+.msg.ok{background:var(--accent-soft);color:var(--accent)} .msg.warn{background:var(--warn-soft);color:var(--warn)}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-left-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.media{display:flex;gap:16px;align-items:flex-start}
+.thumb{width:220px;aspect-ratio:16/9;border-radius:12px;object-fit:cover;background:var(--chip);flex:none}
+.meta h2{font-size:19px;margin:0 0 6px;line-height:1.45}
+.metarow{color:var(--muted);font-size:13.5px;display:flex;gap:12px;flex-wrap:wrap}
+.quick{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:18px 0 0;flex-wrap:wrap}
+.tab{border:none;border-bottom:2px solid transparent;border-radius:0;background:none;padding:10px 12px;color:var(--muted)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:700}
+.tab .n{font-size:12px;background:var(--chip);border-radius:999px;padding:0 7px;margin-inline-start:4px}
+.tablewrap{overflow-x:auto;max-height:360px;overflow-y:auto;border:1px solid var(--line);border-top:none;border-radius:0 0 12px 12px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:600;font-size:12.5px;z-index:1}
+tbody tr{cursor:pointer} tbody tr:hover{background:var(--chip)} tbody tr.sel{background:var(--accent-soft)}
+td.q{font-weight:700} td .tag{font-size:11px;background:var(--chip);padding:1px 6px;border-radius:6px;margin-inline-start:4px;font-weight:600}
+td.ltr,.ltr{direction:ltr;unicode-bidi:isolate}
+td.ltr{text-align:right}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:16px}
+.opt label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px}
+.opt select,.opt input{width:100%}
+.checks{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;font-size:14px}
+.checks label{display:flex;gap:6px;align-items:center}
+.clip{margin-top:14px;padding:12px;border:1px dashed var(--line);border-radius:12px}
+.clip .row input[type=text]{width:110px;direction:ltr;text-align:center}
+.go{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap}
+.go .pick{color:var(--muted);font-size:14px}
+.plist{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:12px}
+.plist div{padding:6px 12px;border-bottom:1px solid var(--line);font-size:14px;display:flex;justify-content:space-between;gap:10px}
+.plist div.seen{color:var(--muted)}
+.plist div span:last-child{color:var(--muted);flex:none}
+.list .item{padding:12px 0;border-top:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}
+.list .item:first-child{border-top:none}
+.item .body{flex:1;min-width:0}
+.item .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .s{color:var(--muted);font-size:13px;display:flex;gap:12px;flex-wrap:wrap;margin-top:2px}
+.item .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.item.off{opacity:.6}
+.bar{height:6px;background:var(--chip);border-radius:99px;overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .4s}
+.item.error .bar i{background:var(--bad)} .item.cancelled .bar i{background:var(--muted)}
+.item .e{color:var(--bad);font-size:13px;white-space:pre-wrap;margin-top:6px}
+.item.done .e{color:var(--warn)}
+.badge{font-size:11.5px;padding:1px 8px;border-radius:999px;background:var(--chip);color:var(--muted)}
+.badge.ok{background:var(--accent-soft);color:var(--accent)}
+.empty{color:var(--muted);font-size:14px}
+.hidden{display:none!important}
+.section-h{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.section-h h3{margin:0;font-size:17px}
+.toggle{display:flex;gap:8px;align-items:center}
+.settings .opt{margin-bottom:6px}
+.help{color:var(--muted);font-size:13px;margin-top:4px}
+footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
+@media (max-width:640px){.media{flex-direction:column}.thumb{width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1 class="brand"><img src="/logo.png" alt="" width="44" height="44"><span dir="ltr">MO <b>Downloader</b></span></h1>
+      <p class="sub">نزّل أي فيديو أو ملف صوتي بالجودة التي تختارها، أو قوائم كاملة، أو تابع قنواتك تلقائياً.</p>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
+
+  <nav id="nav">
+    <button data-p="dl">تنزيل</button>
+    <button data-p="batch">عدة روابط</button>
+    <button data-p="subs">متابعة القنوات <span class="n" id="n-subs">0</span></button>
+    <button data-p="hist">السجل <span class="n" id="n-hist">0</span></button>
+    <button data-p="settings">الإعدادات</button>
+  </nav>
+
+  <!-- ============ single link ============ -->
+  <div class="panel" id="p-dl">
+    <section class="card">
+      <div class="row">
+        <input type="text" id="url" class="grow" placeholder="https://..." autocomplete="off" spellcheck="false">
+        <button class="ghost" id="paste">لصق</button>
+        <button class="primary" id="analyze">عرض الجودات</button>
+      </div>
+      <div class="checks" style="margin-top:10px;color:var(--muted);font-size:13.5px">
+        <label><input type="checkbox" id="playlist"> إذا كان الرابط قائمة تشغيل: اعرض القائمة كاملة</label>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+    </section>
+
+    <section class="card hidden" id="result">
+      <div class="media">
+        <img class="thumb" id="thumb" alt="" referrerpolicy="no-referrer">
+        <div class="meta grow">
+          <h2 id="title"></h2>
+          <div class="metarow" id="metarow"></div>
+          <div class="quick">
+            <button class="small" data-preset="best">⚡ أفضل جودة فيديو</button>
+            <button class="small" data-preset="1080">1080p</button>
+            <button class="small" data-preset="720">720p</button>
+            <button class="small" data-preset="audio">🎵 أفضل صوت MP3</button>
+          </div>
+        </div>
+      </div>
+      <div id="prev" class="msg warn hidden"></div>
+
+      <div class="tabs" id="tabs">
+        <button class="tab" data-k="av">فيديو بصوت <span class="n" id="n-av">0</span></button>
+        <button class="tab" data-k="video">فيديو عالي الجودة <span class="n" id="n-video">0</span></button>
+        <button class="tab" data-k="audio">صوت فقط <span class="n" id="n-audio">0</span></button>
+      </div>
+      <div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+      <p class="sub" id="tabhint" style="margin-top:8px"></p>
+
+      <div class="clip" id="clipbox">
+        <label class="toggle"><input type="checkbox" id="clipOn"> <b>قص جزء فقط</b> <span class="sub">— نزّل دقائق محددة بدل الفيديو كاملاً</span></label>
+        <div class="row hidden" id="clipFields" style="margin-top:10px">
+          <span>من</span><input type="text" id="clipStart" placeholder="0:00" dir="ltr">
+          <span>إلى</span><input type="text" id="clipEnd" dir="ltr">
+          <label class="toggle" style="margin-inline-start:10px"><input type="checkbox" id="clipPrecise"> قص دقيق بالثانية (أبطأ)</label>
+          <div class="help" style="width:100%">اكتب الوقت مثل 1:30 أو 1:02:45. اترك «إلى» فارغاً للتنزيل حتى النهاية. بدون القص الدقيق قد يبدأ المقطع قبل الوقت المحدد بثوانٍ قليلة.</div>
+        </div>
+      </div>
+
+      <div class="opts">
+        <div class="opt" id="o-container"><label>صيغة ملف الفيديو</label>
+          <select id="container">
+            <option value="mp4">MP4 (الأكثر توافقاً)</option>
+            <option value="mkv">MKV (يقبل كل الترميزات)</option>
+            <option value="original">كما هي من الموقع</option>
+          </select></div>
+        <div class="opt" id="o-audio"><label>تحويل الصوت إلى</label>
+          <select id="audio_convert">
+            <option value="original">بدون تحويل (الأصل)</option>
+            <option value="mp3">MP3</option><option value="m4a">M4A / AAC</option>
+            <option value="opus">Opus</option><option value="flac">FLAC (بدون فقد)</option><option value="wav">WAV</option>
+          </select></div>
+        <div class="opt" id="o-aq"><label>جودة الصوت بعد التحويل</label>
+          <select id="audio_quality">
+            <option value="0">الأعلى</option><option value="320">320 kbps</option><option value="256">256 kbps</option>
+            <option value="192">192 kbps</option><option value="128">128 kbps</option>
+          </select></div>
+        <div class="opt"><label>مجلد الحفظ</label><input type="text" id="outdir" class="ltr"></div>
+      </div>
+      <div class="checks">
+        <label id="c-subs"><input type="checkbox" id="subs"> تنزيل الترجمات (عربي/إنجليزي) وتضمينها</label>
+        <label><input type="checkbox" id="meta" checked> تضمين الصورة المصغّرة والبيانات</label>
+      </div>
+      <div class="go">
+        <div class="pick" id="pick">اختر جودة من الجدول</div>
+        <button class="primary" id="download" disabled>تنزيل</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="plresult">
+      <h2 id="pltitle"></h2>
+      <div class="metarow" id="plmeta"></div>
+      <div class="opts">
+        <div class="opt"><label>الجودة لكل العناصر</label>
+          <select id="plpreset" class="presetSel"></select></div>
+        <div class="opt"><label>صيغة الفيديو</label>
+          <select id="plcontainer"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="original">كما هي</option></select></div>
+        <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label>
+          <select id="plaudio" class="audioSel"></select></div>
+        <div class="opt"><label>مجلد الحفظ</label><input type="text" id="ploutdir" class="ltr"></div>
+      </div>
+      <div class="checks"><label><input type="checkbox" id="plskip" checked> تخطّي ما نزّلته سابقاً</label></div>
+      <div class="plist" id="plist"></div>
+      <div class="go"><div class="pick" id="plcount"></div>
+        <button class="primary" id="pldownload">تنزيل القائمة</button></div>
+    </section>
+  </div>
+
+  <!-- ============ batch ============ -->
+  <div class="panel hidden" id="p-batch">
+    <section class="card">
+      <h2>عدة روابط دفعة واحدة</h2>
+      <p class="sub">الصق الروابط (كل رابط في سطر، أو أي نص يحتوي روابط)، فتُضاف كلها إلى طابور التنزيل وتنزل تباعاً.</p>
+      <textarea id="burls" placeholder="https://www.youtube.com/watch?v=...&#10;https://vimeo.com/...&#10;..."></textarea>
+      <div class="opts">
+        <div class="opt"><label>الجودة</label><select id="bpreset" class="presetSel"></select></div>
+        <div class="opt"><label>صيغة الفيديو</label>
+          <select id="bcontainer"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="original">كما هي</option></select></div>
+        <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label><select id="baudio" class="audioSel"></select></div>
+        <div class="opt"><label>مجلد الحفظ</label><input type="text" id="boutdir" class="ltr"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="bskip" checked> تخطّي ما نزّلته سابقاً</label>
+        <label><input type="checkbox" id="bplaylist"> روابط القوائم: نزّل القائمة كاملة</label>
+        <label><input type="checkbox" id="bsubs"> تنزيل الترجمات وتضمينها</label>
+      </div>
+      <div class="go"><div class="pick" id="bcount">لا روابط بعد</div>
+        <button class="primary" id="bgo" disabled>إضافة إلى الطابور</button></div>
+      <div id="bmsg" class="msg hidden"></div>
+    </section>
+  </div>
+
+  <!-- ============ subscriptions ============ -->
+  <div class="panel hidden" id="p-subs">
+    <section class="card">
+      <h2>متابعة قناة أو قائمة</h2>
+      <p class="sub">ضع رابط قناة يوتيوب (مثل youtube.com/@name) أو قائمة تشغيل، وستنزّل الأداة كل فيديو جديد فيها تلقائياً.</p>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="surl" class="grow ltr" placeholder="https://www.youtube.com/@channel" spellcheck="false">
+      </div>
+      <div class="opts">
+        <div class="opt"><label>ابدأ من</label>
+          <select id="sstart">
+            <option value="new">الفيديوهات الجديدة فقط من الآن</option>
+            <option value="3">آخر 3 فيديوهات + الجديد</option>
+            <option value="10">آخر 10 فيديوهات + الجديد</option>
+            <option value="30">آخر 30 فيديو + الجديد</option>
+          </select></div>
+        <div class="opt"><label>الجودة</label><select id="spreset" class="presetSel"></select></div>
+        <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label><select id="saudio" class="audioSel"></select></div>
+        <div class="opt"><label>مجلد الحفظ (يُنشأ داخله مجلد باسم القناة)</label><input type="text" id="soutdir" class="ltr"></div>
+      </div>
+      <div class="go"><div class="pick" id="shint"></div>
+        <button class="primary" id="sadd">متابعة</button></div>
+      <div id="smsg" class="msg hidden"></div>
+    </section>
+    <section class="card">
+      <div class="section-h"><h3>القنوات المتابَعة</h3>
+        <button class="small" id="scheckall">فحص الكل الآن</button></div>
+      <div class="list" id="slist"><p class="empty">لا توجد متابعات بعد.</p></div>
+      <div class="msg info" id="sinfo"></div>
+    </section>
+  </div>
+
+  <!-- ============ history ============ -->
+  <div class="panel hidden" id="p-hist">
+    <section class="card">
+      <div class="section-h"><h3>سجل التنزيلات</h3>
+        <button class="small danger" id="hclear">مسح السجل كله</button></div>
+      <input type="text" id="hq" placeholder="ابحث بالعنوان أو القناة أو الموقع…" style="width:100%">
+      <p class="sub" id="hcount" style="margin-top:6px"></p>
+      <div class="list" id="hlist"></div>
+      <p class="help">السجل يمنع تكرار التنزيل في القوائم والدفعات والمتابعات. لإعادة تنزيل عنصر بتلك الطرق احذفه من السجل أولاً، أما التنزيل العادي من تبويب «تنزيل» فيعمل دائماً.</p>
+    </section>
+  </div>
+
+  <!-- ============ settings ============ -->
+  <div class="panel hidden" id="p-settings">
+    <section class="card settings">
+      <h2>الإعدادات</h2>
+      <div class="opts">
+        <div class="opt"><label>مجلد الحفظ الافتراضي</label><input type="text" id="setOutdir" class="ltr"></div>
+        <div class="opt"><label>عدد التنزيلات في نفس الوقت</label>
+          <select id="setParallel"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></div>
+        <div class="opt"><label>فحص القنوات المتابَعة كل</label>
+          <select id="setHours"><option value="1">ساعة</option><option value="3">3 ساعات</option><option value="6">6 ساعات</option>
+            <option value="12">12 ساعة</option><option value="24">يوم</option></select></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="setAuto"> تشغيل الأداة تلقائياً مع بدء الجهاز (في الخلفية، لتعمل المتابعة دائماً)</label>
+      </div>
+      <div class="go"><span class="pick" id="setmsg"></span><button class="primary" id="setSave">حفظ</button></div>
+    </section>
+
+    <section class="card">
+      <h2>الكوكيز (للمواقع التي تطلب تسجيل دخول)</h2>
+      <div class="row" style="margin-top:8px">
+        <select id="cookies">
+          <option value="">بدون</option>
+          <option value="file">ملف cookies.txt (الأضمن)</option>
+          <option value="firefox">Firefox</option><option value="chrome">Chrome</option><option value="edge">Edge</option>
+          <option value="brave">Brave</option><option value="opera">Opera</option><option value="safari">Safari</option>
+        </select>
+        <span id="cookiebox" class="row hidden">
+          <button class="small" id="cookiepick">تحميل ملف الكوكيز</button>
+          <button class="small ghost hidden" id="cookiedel">حذف</button>
+          <span id="cookiestate"></span>
+          <input type="file" id="cookiefile" accept=".txt,text/plain" class="hidden">
+        </span>
+      </div>
+      <div id="cookiehelp" class="msg info">لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.</div>
+      <div id="cmsg" class="msg hidden"></div>
+    </section>
+
+    <section class="card" id="extcard">
+      <h2>إضافة المتصفح</h2>
+      <p class="sub">تُظهر زر تنزيل فوق أي فيديو في المتصفح، وزراً في شريط الأدوات، وخياراً في قائمة الزر الأيمن، بدون نسخ أي رابط.</p>
+      <ol class="sub" style="margin:10px 0 0;padding-inline-start:20px;line-height:2">
+        <li>اضغط «تجهيز مجلد الإضافة» بالأسفل، فيُنشأ مجلد باسم <span class="ltr">MO Downloader Extension</span> ويُفتح.</li>
+        <li>في Chrome أو Edge أو Brave أو Opera افتح صفحة الإضافات بكتابة هذا العنوان في شريط العنوان:
+          <span class="ltr" style="background:var(--chip);padding:1px 8px;border-radius:6px" id="extUrl">chrome://extensions</span>
+          <button class="small ghost" id="extCopy">نسخ</button>
+          <span class="help">(في Edge: <span class="ltr">edge://extensions</span>)</span></li>
+        <li>فعّل «وضع المطوّر» (Developer mode) من أعلى الصفحة.</li>
+        <li>اضغط «تحميل إضافة غير مُعبأة» (Load unpacked) واختر المجلد من الخطوة الأولى.</li>
+        <li>ثبّت أيقونة MO في شريط الأدوات من زر الإضافات (قطعة البازل).</li>
+      </ol>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="extExport">تجهيز مجلد الإضافة</button>
+        <span class="sub" id="extPath"></span>
+      </div>
+      <p class="help">لا تحذف المجلد بعد التثبيت، فالمتصفح يقرأ الإضافة منه. وعند تحديث الأداة اضغط «تجهيز مجلد الإضافة» مرة أخرى ثم زر التحديث في صفحة الإضافات.</p>
+    </section>
+
+    <section class="card">
+      <h2>عن الأداة</h2>
+      <div class="sub" id="about"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="small" id="openData">فتح مجلد الحفظ</button>
+        <button class="small danger" id="quit">إيقاف الأداة</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ jobs ============ -->
+  <section class="card" style="margin-top:16px">
+    <div class="section-h"><h3>التنزيلات <span class="badge" id="jsum"></span></h3>
+      <span class="row">
+        <button class="small ghost" id="openfolder">فتح مجلد التنزيلات</button>
+        <button class="small ghost" id="cancelall">إلغاء الكل</button>
+        <button class="small ghost" id="clear">مسح المنتهي</button>
+      </span>
+    </div>
+    <div class="list" id="jobs"><p class="empty">لا توجد تنزيلات بعد.</p></div>
+  </section>
+
+  <footer>MO Downloader · يعمل محلياً على جهازك فقط، ولا يتجاوز المحتوى المحمي بتقنيات منع النسخ.</footer>
+</div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+const S = { info: null, tab: "av", sel: null, url: "", settings: {}, status: {}, hasCookie: false, doneSig: "" };
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null) continue;
+    if (k === "class") e.className = v; else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null && k !== false) e.append(k);
+  return e;
+}
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+const fmtSize = (b, approx) => {
+  if (!b) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return (approx ? "≈ " : "") + b.toFixed(b < 10 && i > 1 ? 2 : i > 1 ? 1 : 0) + " " + u[i];
+};
+const fmtDur = (s) => {
+  if (s == null || isNaN(s)) return "";
+  s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0");
+};
+const DF = new Intl.DateTimeFormat("ar-u-nu-latn-ca-gregory", { dateStyle: "medium", timeStyle: "short" });
+const RF = new Intl.RelativeTimeFormat("ar-u-nu-latn", { numeric: "auto" });
+const fmtDate = (t) => t ? DF.format(new Date(t * 1000)) : "—";
+function fmtAgo(t) {
+  if (!t) return "لم يُفحص بعد";
+  const d = (Date.now() / 1000 - t);
+  if (d < 60) return "الآن";
+  if (d < 3600) return RF.format(-Math.round(d / 60), "minute");
+  if (d < 86400) return RF.format(-Math.round(d / 3600), "hour");
+  return RF.format(-Math.round(d / 86400), "day");
+}
+const fmtRate = (k) => k ? Math.round(k) + " kbps" : "—";
+const codec = (c) => {
+  if (!c || c === "none") return "";
+  const p = c.split(".")[0].toLowerCase();
+  return ({avc1:"H.264",avc3:"H.264",h264:"H.264",hev1:"H.265",hvc1:"H.265",h265:"H.265",vp09:"VP9",vp9:"VP9",vp8:"VP8",
+    av01:"AV1",mp4a:"AAC",aac:"AAC",opus:"Opus",vorbis:"Vorbis",mp3:"MP3",flac:"FLAC",ac3:"AC3","ec-3":"E-AC3"})[p] || p;
+};
+function parseT(s) {
+  s = (s || "").trim(); if (!s) return null;
+  const p = s.split(":"); if (p.length > 3 || p.some(x => !/^\d+(\.\d+)?$/.test(x))) return NaN;
+  return p.reduce((a, x) => a * 60 + parseFloat(x), 0);
+}
+function showMsg(box, text, kind = "err") {
+  const m = $(box);
+  if (!text) { m.classList.add("hidden"); return; }
+  m.className = "msg " + (kind === "loading" ? "info" : kind); m.textContent = "";
+  if (kind === "loading") m.append(el("span", {class: "spinner"}), " " + text); else m.textContent = text;
+}
+function armed(btn, fn) {  // two-click confirmation without browser dialogs
+  btn.onclick = () => {
+    if (btn.classList.contains("armed")) { btn.classList.remove("armed"); btn.textContent = btn.dataset.t; fn(); return; }
+    btn.dataset.t = btn.textContent; btn.textContent = "اضغط مرة أخرى للتأكيد"; btn.classList.add("armed");
+    setTimeout(() => { if (btn.classList.contains("armed")) { btn.classList.remove("armed"); btn.textContent = btn.dataset.t; } }, 3500);
+  };
+}
+
+// ---------- shared select options
+const PRESETS = [["best","أفضل جودة متاحة"],["2160","حتى 4K"],["1440","حتى 1440p"],["1080","حتى 1080p"],
+                 ["720","حتى 720p"],["480","حتى 480p"],["360","حتى 360p"],["audio","صوت فقط"]];
+const AUDIOS = [["mp3","MP3"],["m4a","M4A"],["opus","Opus"],["flac","FLAC"],["wav","WAV"]];
+document.querySelectorAll(".presetSel").forEach(s => PRESETS.forEach(([v, t]) => s.append(el("option", {value: v, text: t}))));
+document.querySelectorAll(".audioSel").forEach(s => AUDIOS.forEach(([v, t]) => s.append(el("option", {value: v, text: t}))));
+
+// ---------- navigation
+function showPanel(p) {
+  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b.dataset.p === p));
+  document.querySelectorAll(".panel").forEach(x => x.classList.toggle("hidden", x.id !== "p-" + p));
+  store.set("md_panel", p);
+  if (p === "hist") loadHistory();
+  if (p === "subs") loadSubs();
+}
+document.querySelectorAll("#nav button").forEach(b => b.onclick = () => showPanel(b.dataset.p));
+
+// ---------- status & settings
+async function loadStatus() {
+  try {
+    const s = await api("/api/status"); S.status = s; S.settings = s.settings; S.hasCookie = s.cookie_file;
+    const box = $("status"); box.textContent = "";
+    box.append(el("span", {class: "pill ok", text: "yt-dlp " + s.ytdlp}));
+    if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
+    box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
+    box.append(el("span", {class: "pill " + (s.js.length ? "ok" : "bad"), text: s.js.length ? "JS ✓" : "Deno غير موجود (يوتيوب محدود)"}));
+    if (s.settings.cookies) box.append(el("span", {class: "pill", text: "كوكيز: " + (s.settings.cookies === "file" ? "ملف" : s.settings.cookies)}));
+    for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) if (!$(id).value) $(id).value = s.settings.outdir;
+    $("setOutdir").value = s.settings.outdir; $("setParallel").value = String(s.settings.max_parallel);
+    $("setHours").value = String(+s.settings.check_hours); $("setAuto").checked = !!s.settings.autostart;
+    $("cookies").value = s.settings.cookies || ""; cookieUI();
+    const ab = $("about"); ab.textContent = "";
+    ab.append("الإصدار " + s.app + " · محرك التنزيل ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
+      s.frozen ? " (يُحدَّث تلقائياً يومياً)" : " (يُحدَّث عند كل تشغيل)", el("br"), "مجلد الحفظ: ",
+      el("span", {class: "ltr", text: s.settings.outdir}));
+  } catch (e) {}
+}
+$("setSave").onclick = async () => {
+  try {
+    await api("/api/settings", { outdir: $("setOutdir").value, max_parallel: +$("setParallel").value,
+      check_hours: +$("setHours").value, autostart: $("setAuto").checked });
+    for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) $(id).value = $("setOutdir").value;
+    $("setmsg").textContent = "✓ تم الحفظ"; setTimeout(() => $("setmsg").textContent = "", 2500);
+    loadStatus();
+  } catch (e) { $("setmsg").textContent = e.message; }
+};
+
+// ---------- cookies
+function cookieUI() {
+  const isFile = $("cookies").value === "file";
+  $("cookiebox").classList.toggle("hidden", !isFile);
+  $("cookiehelp").classList.toggle("hidden", isFile && S.hasCookie);
+  $("cookiedel").classList.toggle("hidden", !S.hasCookie);
+  $("cookiestate").textContent = S.hasCookie ? "✓ ملف الكوكيز محفوظ" : "لا يوجد ملف بعد";
+}
+$("cookies").onchange = async () => { cookieUI(); await api("/api/settings", { cookies: $("cookies").value }); loadStatus(); };
+$("cookiepick").onclick = () => $("cookiefile").click();
+$("cookiefile").onchange = async () => {
+  const f = $("cookiefile").files[0]; if (!f) return;
+  try { const r = await api("/api/cookies", { text: await f.text() }); S.hasCookie = true; cookieUI();
+        showMsg("cmsg", "تم حفظ ملف الكوكيز (" + r.count + " عنصر).", "ok"); }
+  catch (e) { showMsg("cmsg", e.message); }
+  $("cookiefile").value = "";
+};
+$("cookiedel").onclick = async () => { await api("/api/cookies", { delete: true }); S.hasCookie = false; cookieUI(); loadStatus(); };
+
+// ---------- single link
+async function analyze() {
+  const url = $("url").value.trim();
+  if (!url) { showMsg("msg", "الصق رابطاً أولاً."); return; }
+  S.url = url; $("analyze").disabled = true;
+  $("result").classList.add("hidden"); $("plresult").classList.add("hidden");
+  showMsg("msg", "جارٍ قراءة الصفحة واستخراج كل الجودات…", "loading");
+  try {
+    const info = await api("/api/info", { url, playlist: $("playlist").checked });
+    S.info = info; showMsg("msg", "");
+    if (info.type === "playlist") renderPlaylist(info); else renderVideo(info);
+  } catch (e) { showMsg("msg", e.message); }
+  finally { $("analyze").disabled = false; }
+}
+function renderVideo(info) {
+  $("result").classList.remove("hidden");
+  const th = $("thumb");
+  if (info.thumbnail) { th.src = info.thumbnail; th.classList.remove("hidden"); } else th.classList.add("hidden");
+  th.onerror = () => th.classList.add("hidden");
+  $("title").textContent = info.title;
+  const row = $("metarow"); row.textContent = "";
+  if (info.uploader) row.append(el("span", {text: "👤 " + info.uploader}));
+  if (info.duration) row.append(el("span", {text: "⏱ " + fmtDur(info.duration)}));
+  if (info.site) row.append(el("span", {text: "🌐 " + info.site}));
+  if (info.is_live) row.append(el("span", {text: "🔴 بث مباشر"}));
+  const pv = $("prev");
+  if (info.previous) {
+    pv.textContent = ""; pv.classList.remove("hidden");
+    pv.append("سبق أن نزّلت هذا الفيديو في " + fmtDate(info.previous.date) + " بجودة " + (info.previous.quality || "—") + ". يمكنك تنزيله مجدداً. ");
+    if (info.previous.file) pv.append(el("button", {class: "small", text: "إظهار الملف السابق",
+      onclick: () => api("/api/open", { path: info.previous.file, select: true })}));
+  } else pv.classList.add("hidden");
+  for (const k of ["av", "video", "audio"]) $("n-" + k).textContent = info.formats[k].length;
+  $("subs").disabled = !info.subtitles.length;
+  $("c-subs").title = info.subtitles.length ? "متاح: " + info.subtitles.join("، ") : "لا توجد ترجمات لهذا الفيديو";
+  $("clipbox").classList.toggle("hidden", !!info.is_live || !S.status.ffmpeg);
+  $("clipOn").checked = false; $("clipFields").classList.add("hidden");
+  $("clipStart").value = ""; $("clipEnd").value = ""; $("clipEnd").placeholder = info.duration ? fmtDur(info.duration) : "النهاية";
+  const bestV = info.formats.video[0], bestAV = info.formats.av[0];
+  let tab = ["video", "av", "audio"].find(k => info.formats[k].length) || "av";
+  if (bestAV && (!bestV || (bestAV.height || 0) >= (bestV.height || 0))) tab = "av";
+  setTab(tab, true);
+}
+function setTab(k, autoSelect) {
+  S.tab = k;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.k === k));
+  const rows = S.info.formats[k], head = $("thead"), body = $("tbody");
+  head.textContent = ""; body.textContent = "";
+  const cols = k === "audio" ? ["", "الجودة", "الصيغة", "الترميز", "التردد", "الحجم", "ملاحظة", "المعرّف"]
+    : ["", "الدقة", "الصيغة", "إطار/ث", "ترميز الفيديو", k === "av" ? "ترميز الصوت" : "معدل البت", "الحجم", "ملاحظة", "المعرّف"];
+  head.append(el("tr", {}, ...cols.map(c => el("th", {text: c}))));
+  $("tabhint").textContent = {
+    av: "ملف واحد يحتوي الصورة والصوت معاً كما يوفّره الموقع.",
+    video: "صورة فقط بأعلى الدقّات (4K/1080p…)؛ ستُدمج تلقائياً مع أفضل صوت متاح.",
+    audio: "مسار صوتي فقط؛ يمكنك تحويله إلى MP3 أو غيره من الخيارات بالأسفل.",
+  }[k];
+  $("o-container").classList.toggle("hidden", k === "audio");
+  $("o-audio").classList.toggle("hidden", k !== "audio");
+  $("o-aq").classList.toggle("hidden", k !== "audio");
+  $("c-subs").classList.toggle("hidden", k === "audio");
+  if (!rows.length) body.append(el("tr", {}, el("td", {colspan: cols.length, class: "empty", text: "لا توجد صيغ من هذا النوع."})));
+  rows.forEach((f, i) => {
+    const radio = el("input", {type: "radio", name: "fmt"});
+    let cells;
+    if (k === "audio") {
+      cells = [el("td", {}, radio),
+        el("td", {class: "q", text: f.abr ? fmtRate(f.abr) : (f.tbr ? fmtRate(f.tbr) : (f.note || "صوت"))}),
+        el("td", {text: f.ext}), el("td", {text: codec(f.acodec) || "—"}),
+        el("td", {text: f.asr ? (f.asr / 1000).toFixed(1) + " kHz" : "—"}),
+        el("td", {class: "ltr", text: fmtSize(f.size, f.approx)}),
+        el("td", {text: [f.note, f.lang].filter(Boolean).join(" · ")}), el("td", {class: "ltr", text: f.id})];
+    } else {
+      const q = el("td", {class: "q", text: f.height ? f.height + "p" : (f.note || f.id)});
+      if (f.height >= 2160) q.append(el("span", {class: "tag", text: "4K"}));
+      if (f.hdr) q.append(el("span", {class: "tag", text: "HDR"}));
+      cells = [el("td", {}, radio), q, el("td", {text: f.ext}), el("td", {text: f.fps ? Math.round(f.fps) : "—"}),
+        el("td", {text: codec(f.vcodec) || "—"}), el("td", {text: k === "av" ? (codec(f.acodec) || "—") : fmtRate(f.vbr || f.tbr)}),
+        el("td", {class: "ltr", text: fmtSize(f.size, f.approx)}), el("td", {text: f.note}), el("td", {class: "ltr", text: f.id})];
+    }
+    const tr = el("tr", {}, ...cells);
+    tr.onclick = () => select(f, tr, radio);
+    body.append(tr);
+    if (autoSelect && i === 0) select(f, tr, radio);
+  });
+  if (!autoSelect) { S.sel = null; updatePick(); }
+}
+function select(f, tr, radio) {
+  document.querySelectorAll("#tbody tr").forEach(r => r.classList.remove("sel"));
+  tr.classList.add("sel"); radio.checked = true; S.sel = { ...f, tabKind: S.tab }; updatePick();
+}
+function clipRange() {
+  if (!$("clipOn").checked) return null;
+  const a = parseT($("clipStart").value), b = parseT($("clipEnd").value);
+  return { a, b, startTxt: $("clipStart").value.trim(), endTxt: $("clipEnd").value.trim() };
+}
+function updatePick() {
+  const f = S.sel; $("download").disabled = !f;
+  if (!f) { $("pick").textContent = "اختر جودة من الجدول"; return; }
+  let size = f.size, approx = f.approx, extra = "";
+  const c = clipRange(), dur = S.info && S.info.duration;
+  if (c) {
+    if (isNaN(c.a) || isNaN(c.b)) extra = " — صيغة الوقت غير صحيحة";
+    else if (c.b != null && c.b <= (c.a || 0)) extra = " — النهاية قبل البداية";
+    else if (dur && size) { const len = (c.b ?? dur) - (c.a || 0); size = size * Math.max(0, len) / dur; approx = true;
+      extra = " — مقطع " + fmtDur(c.a || 0) + " إلى " + fmtDur(c.b ?? dur); }
+  }
+  const what = f.tabKind === "audio" ? "صوت " + (f.abr ? fmtRate(f.abr) : f.ext)
+    : (f.height ? f.height + "p " : "") + f.ext + (f.tabKind === "video" ? " + أفضل صوت" : "");
+  $("pick").textContent = "المختار: " + what + " — " + fmtSize(size, approx) + extra;
+}
+["clipStart", "clipEnd"].forEach(id => $(id).addEventListener("input", updatePick));
+$("clipOn").onchange = () => { $("clipFields").classList.toggle("hidden", !$("clipOn").checked); updatePick(); };
+function singleOpts() {
+  const c = clipRange();
+  return {
+    url: S.url, subs: $("subs").checked && !$("subs").disabled, meta: $("meta").checked, outdir: $("outdir").value.trim(),
+    container: $("container").value, audio_convert: $("audio_convert").value, audio_quality: $("audio_quality").value,
+    title: S.info && S.info.title, clip_start: c ? c.startTxt : "", clip_end: c ? c.endTxt : "", clip_precise: $("clipPrecise").checked,
+  };
+}
+async function download() {
+  const f = S.sel; if (!f) return;
+  try {
+    await api("/api/download", { ...singleOpts(), mode: "format", format_id: f.id, kind: f.tabKind,
+      label: (f.tabKind === "audio" ? "صوت" : (f.height ? f.height + "p" : f.ext)) + (clipRange() ? " · مقطع" : "") });
+    poll(); flash($("download"));
+  } catch (e) { showMsg("msg", e.message); window.scrollTo({top: 0, behavior: "smooth"}); }
+}
+async function downloadPreset(p) {
+  try {
+    await api("/api/download", { ...singleOpts(), mode: "preset", preset: p,
+      audio_convert: p === "audio" ? "mp3" : $("audio_convert").value,
+      label: (p === "audio" ? "MP3" : p === "best" ? "أفضل جودة" : p + "p") + (clipRange() ? " · مقطع" : "") });
+    poll();
+  } catch (e) { showMsg("msg", e.message); window.scrollTo({top: 0, behavior: "smooth"}); }
+}
+function flash(b) { const t = b.textContent; b.textContent = "✓ أُضيف"; setTimeout(() => b.textContent = t, 1500); }
+function renderPlaylist(info) {
+  $("plresult").classList.remove("hidden");
+  $("pltitle").textContent = "📃 " + info.title;
+  $("plmeta").textContent = [info.uploader, info.site, info.count + " عنصر",
+    info.already ? info.already + " منها نُزّل سابقاً" : null].filter(Boolean).join(" · ");
+  const list = $("plist"); list.textContent = "";
+  info.entries.forEach((e, i) => list.append(el("div", {class: e.seen ? "seen" : ""},
+    el("span", {text: (i + 1) + ". " + e.title + (e.seen ? "  ✓" : "")}), el("span", {text: fmtDur(e.duration)}))));
+  $("plcount").textContent = "تُحفظ في مجلد باسم القائمة، مرقّمة بترتيبها.";
+}
+async function downloadPlaylist() {
+  const p = $("plpreset").value;
+  try {
+    await api("/api/download", {
+      url: S.url, playlist: true, mode: "preset", preset: p, skip: $("plskip").checked,
+      container: $("plcontainer").value, audio_convert: p === "audio" ? $("plaudio").value : "original",
+      audio_quality: "0", meta: true, outdir: $("ploutdir").value.trim(), title: S.info.title,
+      label: "قائمة · " + $("plpreset").selectedOptions[0].text,
+    });
+    poll(); flash($("pldownload"));
+  } catch (e) { showMsg("msg", e.message); }
+}
+
+// ---------- batch
+function batchUrls() { return [...new Set(($("burls").value.match(/https?:\/\/[^\s<>"']+/g) || []))]; }
+$("burls").addEventListener("input", () => {
+  const n = batchUrls().length;
+  $("bcount").textContent = n ? n + " رابط" : "لا روابط بعد"; $("bgo").disabled = !n;
+});
+$("bgo").onclick = async () => {
+  const p = $("bpreset").value;
+  try {
+    const r = await api("/api/batch", { urls: $("burls").value, preset: p, container: $("bcontainer").value,
+      audio_convert: p === "audio" ? $("baudio").value : "original", outdir: $("boutdir").value.trim(),
+      skip: $("bskip").checked, playlist: $("bplaylist").checked, subs: $("bsubs").checked, meta: true });
+    showMsg("bmsg", "أُضيف " + r.count + " رابط إلى الطابور. تابع التقدّم في قائمة التنزيلات بالأسفل.", "ok");
+    $("burls").value = ""; $("bcount").textContent = "لا روابط بعد"; $("bgo").disabled = true; poll();
+  } catch (e) { showMsg("bmsg", e.message); }
+};
+
+// ---------- subscriptions
+const presetName = (p) => (PRESETS.find(x => x[0] === p) || [p, p])[1];
+async function loadSubs() {
+  try {
+    const { subs, hours } = await api("/api/subs");
+    $("n-subs").textContent = subs.length;
+    $("sinfo").textContent = "تُفحص القنوات كل " + (+hours === 1 ? "ساعة" : +hours === 24 ? "يوم" : hours + " ساعات") +
+      " أثناء عمل الأداة، وتُحفظ الفيديوهات في مجلد باسم كل قناة. لتعمل المتابعة دائماً فعّل «التشغيل مع بدء الجهاز» من الإعدادات.";
+    const box = $("slist"); box.textContent = "";
+    if (!subs.length) { box.append(el("p", {class: "empty", text: "لا توجد متابعات بعد."})); return; }
+    for (const s of subs) {
+      const st = el("div", {class: "s"},
+        el("span", {class: "badge" + (s.enabled ? " ok" : ""), text: s.enabled ? "مفعّلة" : "متوقفة"}),
+        el("span", {text: presetName(s.preset) + (s.preset === "audio" ? " · " + s.audio_convert.toUpperCase() : "")}),
+        el("span", {text: "آخر فحص: " + fmtAgo(s.last_check)}),
+        s.last_result ? el("span", {text: s.last_result}) : null,
+        s.total ? el("span", {text: "المجموع: " + s.total}) : null);
+      const acts = el("div", {class: "acts"},
+        el("button", {class: "small", text: "فحص الآن", onclick: async () => { await api("/api/subs/check", {id: s.id}); poll(); loadSubs(); }}),
+        el("button", {class: "small", text: s.enabled ? "إيقاف مؤقت" : "تفعيل",
+          onclick: async () => { await api("/api/subs/update", {id: s.id, enabled: !s.enabled}); loadSubs(); }}),
+        el("button", {class: "small ghost", text: "فتح المجلد", onclick: () => api("/api/open", {path: s.outdir})}),
+        el("button", {class: "small ghost", text: "فتح الرابط", onclick: () => api("/api/open_url", {url: s.url})}));
+      const del = el("button", {class: "small danger", text: "إلغاء المتابعة"});
+      armed(del, async () => { await api("/api/subs/delete", {id: s.id}); loadSubs(); });
+      acts.append(del);
+      box.append(el("div", {class: "item" + (s.enabled ? "" : " off")},
+        el("div", {class: "body"}, el("div", {class: "t", text: "📺 " + s.title}),
+          el("div", {class: "s"}, el("span", {class: "ltr", text: s.url})), st, acts)));
+    }
+  } catch (e) {}
+}
+$("sadd").onclick = async () => {
+  const url = $("surl").value.trim(); if (!url) { showMsg("smsg", "ضع رابط القناة أو القائمة."); return; }
+  const p = $("spreset").value;
+  $("sadd").disabled = true; showMsg("smsg", "جارٍ قراءة القناة…", "loading");
+  try {
+    const r = await api("/api/subs/add", { url, start: $("sstart").value, preset: p,
+      audio_convert: $("saudio").value, container: "mp4", outdir: $("soutdir").value.trim() });
+    showMsg("smsg", "✓ تمت متابعة «" + r.sub.title + "»." + ($("sstart").value === "new" ? " سيُنزَّل كل فيديو جديد تلقائياً." : " بدأ تنزيل آخر الفيديوهات."), "ok");
+    $("surl").value = ""; loadSubs(); poll();
+  } catch (e) { showMsg("smsg", e.message); }
+  finally { $("sadd").disabled = false; }
+};
+$("scheckall").onclick = async () => { await api("/api/subs/check", {all: true}); poll(); loadSubs(); };
+
+// ---------- history
+let hTimer = null;
+$("hq").addEventListener("input", () => { clearTimeout(hTimer); hTimer = setTimeout(loadHistory, 250); });
+async function loadHistory() {
+  try {
+    const r = await api("/api/history?limit=300&q=" + encodeURIComponent($("hq").value));
+    $("n-hist").textContent = r.total;
+    $("hcount").textContent = r.total ? (r.count === r.total ? r.total + " تنزيل" : r.count + " من " + r.total) +
+      (r.count > r.items.length ? " (يُعرض أحدث " + r.items.length + ")" : "") : "";
+    const box = $("hlist"); box.textContent = "";
+    if (!r.items.length) { box.append(el("p", {class: "empty", text: r.total ? "لا نتائج." : "لم تنزّل شيئاً بعد."})); return; }
+    for (const h of r.items) {
+      const del = el("button", {class: "small ghost danger", text: "حذف من السجل"});
+      armed(del, async () => { await api("/api/history/delete", {key: h.key, date: h.date}); loadHistory(); });
+      box.append(el("div", {class: "item"}, el("div", {class: "body"},
+        el("div", {class: "t", text: h.title}),
+        el("div", {class: "s"},
+          el("span", {text: fmtDate(h.date)}), el("span", {text: h.quality}),
+          h.size ? el("span", {class: "ltr", text: fmtSize(h.size)}) : null,
+          h.clip ? el("span", {text: "✂ " + h.clip}) : null,
+          h.uploader ? el("span", {text: h.uploader}) : null,
+          h.site ? el("span", {text: h.site}) : null,
+          h.source ? el("span", {class: "badge", text: h.source}) : null),
+        el("div", {class: "acts"},
+          h.file ? el("button", {class: "small", text: "إظهار الملف", onclick: () => api("/api/open", {path: h.file, select: true})}) : null,
+          h.url ? el("button", {class: "small ghost", text: "فتح الرابط", onclick: () => api("/api/open_url", {url: h.url})}) : null,
+          h.url ? el("button", {class: "small ghost", text: "تنزيل مجدداً", onclick: () => {
+            $("url").value = h.url; showPanel("dl"); analyze(); }}) : null,
+          del))));
+    }
+  } catch (e) {}
+}
+armed($("hclear"), async () => { await api("/api/history/clear", {}); loadHistory(); });
+
+// ---------- jobs
+let pollTimer = null;
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const { jobs } = await api("/api/jobs");
+    renderJobs(jobs);
+    const active = jobs.some(j => !["done", "error", "cancelled"].includes(j.status));
+    const sig = jobs.map(j => j.id + j.status + (j.done_count || 0)).join();
+    if (sig !== S.doneSig) {  // something finished -> refresh history/subs counters
+      S.doneSig = sig;
+      const panel = store.get("md_panel", "dl");
+      if (panel === "hist") loadHistory(); else api("/api/history?limit=1").then(r => $("n-hist").textContent = r.total).catch(() => {});
+      if (panel === "subs") loadSubs();
+    }
+    pollTimer = setTimeout(poll, active ? 800 : 4000);
+  } catch (e) { pollTimer = setTimeout(poll, 4000); }
+}
+function renderJobs(jobs) {
+  const box = $("jobs"); box.textContent = "";
+  const act = jobs.filter(j => ["starting", "downloading", "processing"].includes(j.status)).length;
+  const q = jobs.filter(j => j.status === "queued").length;
+  $("jsum").textContent = act || q ? (act ? act + " يعمل" : "") + (act && q ? " · " : "") + (q ? q + " في الطابور" : "") : "";
+  $("jsum").classList.toggle("hidden", !(act || q));
+  if (!jobs.length) { box.append(el("p", {class: "empty", text: "لا توجد تنزيلات بعد."})); return; }
+  for (const j of jobs) {
+    const s = el("div", {class: "s"});
+    s.append(el("span", {text: j.stage || ""}));
+    if (j.label) s.append(el("span", {class: "badge", text: j.label}));
+    if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
+    if (j.many) {
+      if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
+      if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
+      if (j.skipped) s.append(el("span", {text: "تُخطّي " + j.skipped + " (موجود سابقاً)"}));
+      if (j.failed) s.append(el("span", {text: "تعذّر " + j.failed}));
+    }
+    if (j.status === "downloading") {
+      if (j.percent != null) s.append(el("span", {text: j.percent.toFixed(1) + "%"}));
+      if (j.total) s.append(el("span", {class: "ltr", text: fmtSize(j.downloaded) + " / " + fmtSize(j.total)}));
+      if (j.speed) s.append(el("span", {class: "ltr", text: fmtSize(j.speed) + "/s"}));
+      if (j.eta != null) s.append(el("span", {text: "متبقٍّ " + fmtDur(j.eta)}));
+    }
+    const fin = ["done", "cancelled"].includes(j.status);
+    const bar = fin ? null : el("div", {class: "bar"}, el("i"));
+    if (bar) bar.firstChild.style.width = (j.percent || 0) + "%";
+    const acts = el("div", {class: "acts"});
+    if (!["done", "error", "cancelled"].includes(j.status))
+      acts.append(el("button", {class: "small", text: "إلغاء", onclick: () => api("/api/cancel", {id: j.id}).then(poll)}));
+    if (j.status === "done" && (j.file || j.outdir))
+      acts.append(el("button", {class: "small", text: j.file && !j.many ? "إظهار الملف" : "فتح المجلد",
+        onclick: () => api("/api/open", {path: j.many ? j.outdir : (j.file || j.outdir), select: !!j.file && !j.many})}));
+    if (j.status === "error" || j.status === "cancelled")
+      acts.append(el("button", {class: "small", text: "إعادة المحاولة", onclick: () => api("/api/retry", {id: j.id}).then(poll)}));
+    const title = j.many && j.current && j.status !== "done" ? j.title + " — " + j.current : j.title;
+    box.append(el("div", {class: "item " + j.status}, el("div", {class: "body"},
+      el("div", {class: "t", text: title}), s, bar, j.error ? el("div", {class: "e", dir: "auto", text: j.error}) : null, acts)));
+  }
+}
+
+// ---------- wire up
+$("analyze").onclick = analyze;
+$("url").addEventListener("keydown", e => { if (e.key === "Enter") analyze(); });
+$("url").addEventListener("paste", () => setTimeout(() => { if ($("url").value.trim()) analyze(); }, 50));
+$("paste").onclick = async () => {
+  try { $("url").value = (await navigator.clipboard.readText()).trim(); analyze(); }
+  catch (e) { $("url").focus(); showMsg("msg", "اضغط Ctrl+V داخل خانة الرابط.", "info"); }
+};
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => setTab(t.dataset.k, true));
+document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => downloadPreset(b.dataset.preset));
+$("download").onclick = download;
+$("pldownload").onclick = downloadPlaylist;
+$("clear").onclick = () => api("/api/clear", {}).then(poll);
+$("cancelall").onclick = () => api("/api/cancel_all", {}).then(poll);
+$("openfolder").onclick = () => api("/api/open", { path: S.settings.outdir });
+$("openData").onclick = () => api("/api/open", { path: S.settings.outdir });
+$("quit").onclick = async () => {
+  try { await api("/api/shutdown", {}); } catch (e) {}
+  clearTimeout(pollTimer);
+  document.querySelector(".wrap").innerHTML = '<div class="card" style="margin-top:40px;text-align:center"><h2 style="margin:0 0 6px">تم إيقاف MO Downloader</h2><p class="sub">يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.</p></div>';
+};
+$("extExport").onclick = async () => {
+  try { const r = await api("/api/ext_folder", {}); $("extPath").textContent = "✓ " + r.path; }
+  catch (e) { $("extPath").textContent = e.message; }
+};
+$("extCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("extUrl").textContent); $("extCopy").textContent = "✓ نُسخ"; } catch (e) {}
+  setTimeout(() => $("extCopy").textContent = "نسخ", 1500);
+};
+const startUrl = new URLSearchParams(location.search).get("url");  // opened from the browser extension
+loadStatus().then(() => {
+  $("extcard").classList.toggle("hidden", !S.status.has_extension);
+  if (startUrl) {
+    history.replaceState(null, "", "/");
+    showPanel("dl"); $("url").value = startUrl; analyze();
+  } else showPanel(store.get("md_panel", "dl"));
+  loadSubs();
+});
+poll();
+$("url").focus();
+</script>
+</body>
+</html>

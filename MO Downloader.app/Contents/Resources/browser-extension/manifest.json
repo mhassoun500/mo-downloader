@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "MO Downloader",
+  "version": "1.0.0",
+  "description": "نزّل الفيديو أو الصوت من الصفحة الحالية بضغطة واحدة عبر برنامج MO Downloader على جهازك.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "MO Downloader",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
+  },
+  "permissions": ["contextMenus", "storage", "activeTab"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mo-downloader@mo.local",
+      "strict_min_version": "121.0"
+    }
+  }
+}
