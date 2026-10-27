@@ -49,6 +49,9 @@ def main():
     import deno as deno_pkg
     deno_bin = Path(deno_pkg.find_deno_bin())
     print("deno:", deno_bin)
+    # aria2 (multi-connection downloads): CI puts the official Windows build / Homebrew's build in MO_ARIA2C
+    aria2 = os.environ.get("MO_ARIA2C") or shutil.which("aria2c")
+    print("aria2:", aria2 or "not bundled")
     versions = {"yt-dlp": md.version("yt-dlp"), "yt-dlp-ejs": md.version("yt-dlp-ejs"), "app": app_version()}
     print("engine:", versions)
 
@@ -66,6 +69,7 @@ def main():
         "--add-binary", f"{deno_bin}{os.pathsep}deno_bin",
         "--collect-data", "certifi", "--hidden-import", "certifi",
         "--hidden-import", "tkinter", "--hidden-import", "tkinter.filedialog",
+        *(["--add-binary", f"{aria2}{os.pathsep}aria2", "--add-data", f"{KIT / 'licenses'}{os.pathsep}licenses"] if aria2 else []),
     ]
     if SYSTEM == "Windows":
         args += ["--windowed", "--icon", ICO]

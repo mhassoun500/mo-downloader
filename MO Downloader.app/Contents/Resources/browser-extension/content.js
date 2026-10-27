@@ -1,4 +1,4 @@
-// MO Downloader — floating "download" button over videos on any page.
+// MO Downloader — floating "download" button over videos (quality menu) and images (one click) on any page.
 (() => {
   if (window.__moDownloader) return;
   window.__moDownloader = true;
@@ -6,7 +6,12 @@
   if (/^(127\.0\.0\.1|localhost)$/.test(location.hostname) && +location.port >= 8765 && +location.port <= 8770) return;
 
   const ext = globalThis.browser ?? chrome;
-  const MIN_W = 220, MIN_H = 120;
+  const MIN_W = 220, MIN_H = 120, IMG_MIN = 180;
+  let opt = { videoButton: true, imageButton: true };
+  try {
+    ext.storage.local.get(opt).then((o) => (opt = o));
+    ext.storage.onChanged.addListener((ch) => { for (const k in ch) if (k in opt) opt[k] = ch[k].newValue; });
+  } catch (e) {}
   const OPTIONS = [
     ["best", "⚡ أفضل جودة"],
     ["1080", "1080p"],
@@ -46,11 +51,11 @@
   <div class="btn" title="تنزيل بواسطة MO Downloader">
     <svg viewBox="0 0 24 24" fill="none" stroke="#ffc94d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 3v12M6.5 10l5.5 5.5L17.5 10"/><path d="M4 16v4h16v-4" stroke="#fff" stroke-width="2.6"/></svg>
-    <span>تنزيل</span>
+    <span class="lbl">تنزيل</span>
   </div>
   <div class="menu"><div class="hd">MO Downloader</div></div>
   <div class="toast"></div>`;
-  const btn = root.querySelector(".btn"), menu = root.querySelector(".menu"), toastEl = root.querySelector(".toast");
+  const btn = root.querySelector(".btn"), lbl = root.querySelector(".lbl"), menu = root.querySelector(".menu"), toastEl = root.querySelector(".toast");
   for (const [id, label] of OPTIONS) {
     const b = document.createElement("button");
     b.textContent = label;
@@ -67,13 +72,21 @@
   document.addEventListener("fullscreenchange", () => attached && attach());
   document.addEventListener("webkitfullscreenchange", () => attached && attach());
 
-  let current = null, hideTimer = null, menuOpen = false;
+  let current = null, currentKind = "video", hideTimer = null, menuOpen = false;
 
+  const onScreen = (r) => r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   function visibleVideos() {
+    if (!opt.videoButton) return [];
     return [...document.querySelectorAll("video")].filter((v) => {
       const r = v.getBoundingClientRect();
-      return r.width >= MIN_W && r.height >= MIN_H && r.bottom > 0 && r.right > 0 &&
-             r.top < innerHeight && r.left < innerWidth && getComputedStyle(v).visibility !== "hidden";
+      return r.width >= MIN_W && r.height >= MIN_H && onScreen(r) && getComputedStyle(v).visibility !== "hidden";
+    });
+  }
+  function visibleImages() {
+    if (!opt.imageButton) return [];
+    return [...document.images].filter((im) => {
+      const r = im.getBoundingClientRect();
+      return r.width >= IMG_MIN && r.height >= IMG_MIN * 0.7 && onScreen(r) && /^https?:/.test(im.currentSrc || im.src || "");
     });
   }
 
@@ -89,10 +102,13 @@
     }
   }
 
-  function show(v) {
+  function show(v, kind) {
     clearTimeout(hideTimer);
     if (!attached) attach();
+    if (current !== v) { menuOpen = false; menu.style.display = "none"; }
     current = v;
+    currentKind = kind;
+    lbl.textContent = kind === "image" ? "تنزيل الصورة" : "تنزيل";
     btn.style.display = "flex";
     place();
   }
@@ -111,11 +127,14 @@
     const now = performance.now();
     if (now - last < 120) return;
     last = now;
-    const hit = visibleVideos().find((v) => {
-      const r = v.getBoundingClientRect();
+    const inside = (el) => {
+      const r = el.getBoundingClientRect();
       return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-    });
-    if (hit) show(hit);
+    };
+    const v = visibleVideos().find(inside);
+    const im = v ? null : visibleImages().find(inside);
+    if (v) show(v, "video");
+    else if (im) show(im, "image");
     else if (current && !menuOpen) scheduleHide();
   }, { passive: true, capture: true });
   addEventListener("scroll", place, { passive: true, capture: true });
@@ -125,6 +144,7 @@
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     e.preventDefault();
+    if (currentKind === "image") { saveImage(current); return; }
     menuOpen = !menuOpen;
     menu.style.display = menuOpen ? "block" : "none";
     place();
@@ -166,6 +186,16 @@
         resolve({ error: "أعد تحميل الصفحة (تم تحديث الإضافة)." });
       }
     });
+  }
+
+  async function saveImage(img) {
+    const url = img && (img.currentSrc || img.src);
+    if (!url) return;
+    toast("جارٍ إرسال الصورة إلى MO Downloader…", "", 0);
+    const name = decodeURIComponent((url.split(/[?#]/)[0].split("/").pop() || "")).slice(0, 120);
+    const res = await send({ type: "downloadFile", url, page: location.href, filename: /\.\w{2,5}$/.test(name) ? name : "" });
+    if (res.error) toast(explain(res.error), "err", 6000);
+    else toast("✓ أُضيفت الصورة إلى التنزيلات", "ok");
   }
 
   async function choose(id) {

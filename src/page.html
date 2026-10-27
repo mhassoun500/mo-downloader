@@ -310,6 +310,19 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
           <select id="setHours"><option value="1">ساعة</option><option value="3">3 ساعات</option><option value="6">6 ساعات</option>
             <option value="12">12 ساعة</option><option value="24">يوم</option></select></div>
       </div>
+      <div class="opts">
+        <div class="opt"><label>تسريع التنزيل (عدة اتصالات في نفس الوقت)</label>
+          <select id="setAccel"><option value="on">مفعّل</option><option value="off">متوقف</option></select></div>
+        <div class="opt"><label>عدد الاتصالات لكل ملف</label>
+          <select id="setConns"><option>4</option><option>8</option><option>16</option></select></div>
+        <div class="opt"><label>تسجيل دخولك من إضافة المتصفح</label>
+          <select id="setExtCk">
+            <option value="auto">يُستخدم عند الحاجة فقط (موصى به)</option>
+            <option value="always">يُستخدم دائماً</option>
+            <option value="never">لا يُستخدم</option>
+          </select></div>
+      </div>
+      <p class="help" id="accelHelp"></p>
       <div class="checks">
         <label><input type="checkbox" id="setAuto"> تشغيل الأداة تلقائياً مع بدء الجهاز (في الخلفية، لتعمل المتابعة دائماً)</label>
       </div>
@@ -498,12 +511,19 @@ async function loadStatus() {
     box.append(el("span", {class: "pill ok", text: "yt-dlp " + s.ytdlp}));
     if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
     box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
+    if (s.aria2 && s.settings.accel !== false) box.append(el("span", {class: "pill ok", text: "تسريع ✓"}));
     box.append(el("span", {class: "pill " + (s.js.length ? "ok" : "bad"), text: s.js.length ? "JS ✓" : "Deno غير موجود (يوتيوب محدود)"}));
     if (s.settings.proxy) box.append(el("span", {class: "pill", text: "بروكسي: " + (s.settings.proxy_mode === "always" ? "دائماً" : "عند الفشل")}));
     if (s.settings.cookies) box.append(el("span", {class: "pill", text: "كوكيز: " + (s.settings.cookies === "file" ? "ملف" : s.settings.cookies)}));
     for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) if (!$(id).value) $(id).value = s.settings.outdir;
     $("setOutdir").value = s.settings.outdir; $("setParallel").value = String(s.settings.max_parallel);
     $("setHours").value = String(+s.settings.check_hours); $("setAuto").checked = !!s.settings.autostart;
+    $("setAccel").value = s.settings.accel === false ? "off" : "on";
+    $("setConns").value = String([4, 8, 16].includes(+s.settings.accel_conns) ? +s.settings.accel_conns : 8);
+    $("setExtCk").value = s.settings.ext_cookies || "auto";
+    $("accelHelp").textContent = s.aria2
+      ? "التسريع يقسم الملف إلى أجزاء تُحمَّل معاً، ويتيح الإيقاف المؤقت والاستئناف من نفس النقطة. لا يعمل مع بروكسي socks5."
+      : "أداة التسريع (aria2) غير متوفرة في هذه النسخة، فتعمل التنزيلات باتصال واحد.";
     $("cookies").value = s.settings.cookies || ""; cookieUI();
     if (document.activeElement !== $("proxy")) $("proxy").value = s.settings.proxy || "";
     $("proxyMode").value = s.settings.proxy_mode || "fallback";
@@ -516,7 +536,8 @@ async function loadStatus() {
 $("setSave").onclick = async () => {
   try {
     await api("/api/settings", { outdir: $("setOutdir").value, max_parallel: +$("setParallel").value,
-      check_hours: +$("setHours").value, autostart: $("setAuto").checked });
+      check_hours: +$("setHours").value, autostart: $("setAuto").checked,
+      accel: $("setAccel").value === "on", accel_conns: +$("setConns").value, ext_cookies: $("setExtCk").value });
     for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) $(id).value = $("setOutdir").value;
     $("setmsg").textContent = "✓ تم الحفظ"; setTimeout(() => $("setmsg").textContent = "", 2500);
     loadStatus();
@@ -830,6 +851,7 @@ function renderJobs(jobs) {
     if (j.label) s.append(el("span", {class: "badge", text: j.label}));
     if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
     if (j.via_proxy) s.append(el("span", {class: "badge", text: "عبر البروكسي"}));
+    if (j.via_cookies) s.append(el("span", {class: "badge", text: "بتسجيل دخولك"}));
     if (j.many) {
       if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
       if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
@@ -842,10 +864,14 @@ function renderJobs(jobs) {
       if (j.speed) s.append(el("span", {class: "ltr", text: fmtSize(j.speed) + "/s"}));
       if (j.eta != null) s.append(el("span", {text: "متبقٍّ " + fmtDur(j.eta)}));
     }
-    const fin = ["done", "cancelled"].includes(j.status);
+    const fin = ["done", "cancelled", "paused"].includes(j.status);
     const bar = fin ? null : el("div", {class: "bar"}, el("i"));
     if (bar) bar.firstChild.style.width = (j.percent || 0) + "%";
     const acts = el("div", {class: "acts"});
+    if (["queued", "starting", "downloading", "processing"].includes(j.status) && !j.many)
+      acts.append(el("button", {class: "small", text: "⏸ إيقاف مؤقت", onclick: () => api("/api/pause", {id: j.id}).then(poll)}));
+    if (j.status === "paused")
+      acts.append(el("button", {class: "small", text: "▶ استئناف", onclick: () => api("/api/resume", {id: j.id}).then(poll)}));
     if (!["done", "error", "cancelled"].includes(j.status))
       acts.append(el("button", {class: "small", text: "إلغاء", onclick: () => api("/api/cancel", {id: j.id}).then(poll)}));
     if (j.status === "done" && (j.file || j.outdir))
