@@ -885,13 +885,18 @@ function addBrowse(id, onPick) {
   const inp = $(id), wrap = el("div", {class: "pathrow"});
   inp.parentNode.insertBefore(wrap, inp);
   const b = el("button", {class: "small", type: "button", text: "تصفّح…", title: "اختيار مجلد"});
+  const note = el("div", {class: "help hidden"});
   wrap.append(inp, b);
+  wrap.after(note);
+  const say = (t, cls) => { note.textContent = t || ""; note.className = "help" + (t ? "" : " hidden"); note.style.color = cls === "err" ? "var(--bad)" : ""; };
   b.onclick = async () => {
     b.disabled = true; const t = b.textContent; b.textContent = "…";
+    say("اختر المجلد من النافذة التي فُتحت. إن لم تظهر أمامك فابحث عنها في شريط المهام.");
     try {
       const r = await api("/api/pick_folder", { initial: inp.value });
-      if (r.path) { inp.value = r.path; if (onPick) await onPick(r.path); }
-    } catch (e) { inp.title = e.message; }
+      if (r.path) { inp.value = r.path; say(""); if (onPick) await onPick(r.path); }
+      else say("");
+    } catch (e) { say(e.message, "err"); }
     finally { b.disabled = false; b.textContent = t; }
   };
 }

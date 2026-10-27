@@ -65,6 +65,7 @@ def main():
         "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",
         "--add-binary", f"{deno_bin}{os.pathsep}deno_bin",
         "--collect-data", "certifi", "--hidden-import", "certifi",
+        "--hidden-import", "tkinter", "--hidden-import", "tkinter.filedialog",
     ]
     if SYSTEM == "Windows":
         args += ["--windowed", "--icon", ICO]

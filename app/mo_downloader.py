@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.2"
+APP_VERSION = "2.2.1"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -1112,45 +1112,98 @@ def history_delete(key=None, date=None, everything=False):
     return {"ok": True}
 
 
+PICK_LOCK = threading.Lock()
+
+
+def _pick_tk(initial, title):
+    """Modern native folder dialog through Tk (on Windows this is the same window Explorer uses).
+    Forced on top of the browser so it can't open hidden behind it."""
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+        root.update()
+        root.lift()
+        root.focus_force()
+        path = filedialog.askdirectory(parent=root, initialdir=initial, title=title, mustexist=False)
+    finally:
+        root.destroy()
+    return os.path.normpath(path) if path else None
+
+
+def _pick_powershell(initial, title):
+    def q(x):
+        return "'" + str(x).replace("'", "''") + "'"
+    ps = ("Add-Type -AssemblyName System.Windows.Forms;"
+          "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+          # a real (invisible) top-most owner window, shown first, so the dialog appears in front of the browser
+          "$o=New-Object System.Windows.Forms.Form;$o.TopMost=$true;$o.ShowInTaskbar=$false;$o.Opacity=0;"
+          "$o.StartPosition='CenterScreen';$o.Show();$o.Activate();"
+          "$f=New-Object System.Windows.Forms.FolderBrowserDialog;"
+          f"$f.Description={q(title)};$f.SelectedPath={q(initial)};$f.ShowNewFolderButton=$true;"
+          "$r=$f.ShowDialog($o);$o.Close();"
+          "if($r -eq 'OK'){Write-Output $f.SelectedPath}")
+    enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+    r = subprocess.run(["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+                       capture_output=True, timeout=900, creationflags=0x08000000)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.decode("utf-8", "replace").strip()[:300] or f"powershell exit {r.returncode}")
+    out = r.stdout.decode("utf-8", "replace").strip()
+    return out or None
+
+
 def pick_folder(initial=""):
-    """Native 'choose folder' dialog on the user's computer. Returns a path or None if cancelled."""
+    """Native 'choose folder' dialog on the user's computer. Returns a path, or None if the user cancelled."""
     initial = initial if initial and os.path.isdir(initial) else str(Path.home())
     title = "اختر مجلد حفظ التنزيلات"
+    if not PICK_LOCK.acquire(blocking=False):
+        raise ValueError("نافذة اختيار المجلد مفتوحة بالفعل. ابحث عنها في شريط المهام إن كانت خلف المتصفح.")
     try:
         if SYSTEM == "Windows":
-            def q(x):
-                return "'" + str(x).replace("'", "''") + "'"
-            ps = ("Add-Type -AssemblyName System.Windows.Forms;"
-                  "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
-                  "$f=New-Object System.Windows.Forms.FolderBrowserDialog;"
-                  f"$f.Description={q(title)};$f.SelectedPath={q(initial)};$f.ShowNewFolderButton=$true;"
-                  "try{$f.UseDescriptionForTitle=$true}catch{};"
-                  "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false};"
-                  "if($f.ShowDialog($o) -eq 'OK'){Write-Output $f.SelectedPath}")
-            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
-            r = subprocess.run(["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
-                               capture_output=True, timeout=600, creationflags=0x08000000)
-            out = r.stdout.decode("utf-8", "replace").strip()
+            try:
+                out = _pick_tk(initial, title)
+            except Exception as e:  # noqa: BLE001
+                log(f"[pick] tk dialog failed ({e}); trying PowerShell")
+                out = _pick_powershell(initial, title)
         elif SYSTEM == "Darwin":
             esc = initial.replace('"', '\\"')
-            script = (f'set f to choose folder with prompt "{title}" default location (POSIX file "{esc}")\n'
+            # "activate" brings the dialog in front of the browser
+            script = (f'activate\nset f to choose folder with prompt "{title}" default location (POSIX file "{esc}")\n'
                       'POSIX path of f')
-            r = subprocess.run(["osascript", "-e", 'tell application "System Events" to activate', "-e", script],
-                               capture_output=True, timeout=600)
-            out = r.stdout.decode("utf-8", "replace").strip()
+            r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=900)
+            err = r.stderr.decode("utf-8", "replace")
+            if r.returncode != 0 and "-128" not in err and "cancel" not in err.lower():
+                raise RuntimeError(err.strip()[:300])
+            out = r.stdout.decode("utf-8", "replace").strip() or None
         else:
-            out = ""
+            out = None
             for cmd in (["zenity", "--file-selection", "--directory", f"--title={title}", f"--filename={initial}/"],
                         ["kdialog", "--getexistingdirectory", initial, "--title", title]):
                 if shutil.which(cmd[0]):
-                    out = subprocess.run(cmd, capture_output=True, timeout=600).stdout.decode("utf-8", "replace").strip()
+                    out = subprocess.run(cmd, capture_output=True, timeout=900).stdout.decode("utf-8", "replace").strip()
                     break
             else:
-                raise ValueError("لا تتوفر نافذة اختيار المجلدات على هذا النظام؛ اكتب المسار يدوياً.")
+                try:
+                    out = _pick_tk(initial, title)
+                except Exception:  # noqa: BLE001
+                    raise ValueError("لا تتوفر نافذة اختيار المجلدات على هذا النظام؛ اكتب المسار يدوياً.") from None
     except subprocess.TimeoutExpired:
         return None
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log(f"[pick] folder dialog failed: {e}")
+        raise ValueError("تعذّر فتح نافذة اختيار المجلد. اكتب المسار في الخانة يدوياً.\n" + str(e)[:200]) from e
+    finally:
+        PICK_LOCK.release()
+    if not out:
+        return None
     out = out.rstrip("/\\") or out
-    return out if out and os.path.isdir(out) else None
+    if not os.path.isdir(out):
+        os.makedirs(out, exist_ok=True)
+    return out
 
 
 def proxy_test(proxy):
@@ -2406,13 +2459,18 @@ function addBrowse(id, onPick) {
   const inp = $(id), wrap = el("div", {class: "pathrow"});
   inp.parentNode.insertBefore(wrap, inp);
   const b = el("button", {class: "small", type: "button", text: "تصفّح…", title: "اختيار مجلد"});
+  const note = el("div", {class: "help hidden"});
   wrap.append(inp, b);
+  wrap.after(note);
+  const say = (t, cls) => { note.textContent = t || ""; note.className = "help" + (t ? "" : " hidden"); note.style.color = cls === "err" ? "var(--bad)" : ""; };
   b.onclick = async () => {
     b.disabled = true; const t = b.textContent; b.textContent = "…";
+    say("اختر المجلد من النافذة التي فُتحت. إن لم تظهر أمامك فابحث عنها في شريط المهام.");
     try {
       const r = await api("/api/pick_folder", { initial: inp.value });
-      if (r.path) { inp.value = r.path; if (onPick) await onPick(r.path); }
-    } catch (e) { inp.title = e.message; }
+      if (r.path) { inp.value = r.path; say(""); if (onPick) await onPick(r.path); }
+      else say("");
+    } catch (e) { say(e.message, "err"); }
     finally { b.disabled = false; b.textContent = t; }
   };
 }
