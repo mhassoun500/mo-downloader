@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -88,6 +88,8 @@ DEFAULT_SETTINGS = {
     "check_hours": 6,
     "autostart": False,
     "cookies": "",
+    "proxy": "",
+    "proxy_mode": "fallback",   # fallback = only when the direct connection fails | always
     "engine_checked": 0,
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
@@ -324,6 +326,7 @@ class Cancelled(Exception):
 def clean_err(e):
     msg = ANSI.sub("", str(e)).strip()
     msg = re.sub(r"^ERROR:\s*", "", msg)
+    msg = re.sub(r";?\s*please report this issue on.*$", "", msg, flags=re.S | re.I).strip()  # yt-dlp boilerplate
     if re.search(r"[؀-ۿ]", msg):  # our own Arabic message, already explains itself
         return msg
     hints = []
@@ -336,8 +339,13 @@ def clean_err(e):
     elif "dpapi" in low or "decrypt" in low or "app-bound" in low or "app bound" in low:
         hints.append("إصدارات Chrome وEdge الحديثة على ويندوز تشفّر الكوكيز بطريقة تمنع البرامج الأخرى من قراءتها. "
                      "استخدم «ملف cookies.txt» أو Firefox من الإعدادات بدلاً منها.")
-    elif "sign in" in low or "login" in low or "cookies" in low or "confirm you" in low:
+    elif any(k in low for k in ("sign in", "log in", "login", "--cookies", "cookies-from-browser",
+                                "not a bot", "age-restricted", "members only", "private video")):
         hints.append("الموقع يطلب تسجيل الدخول: اختر «ملف cookies.txt» أو Firefox من الإعدادات ثم أعد المحاولة.")
+    if is_network_error(msg):
+        hints.append("تعذّر الوصول إلى الموقع من شبكتك (قد يكون محجوباً أو الاتصال مقطوعاً). "
+                     + ("جرّبت الأداة البروكسي أيضاً ولم ينجح؛ تأكد أن البروكسي يعمل من «اختبار البروكسي» في الإعدادات."
+                        if SETTINGS.get("proxy") else "يمكنك ضبط بروكسي من تبويب الإعدادات لتعيد الأداة المحاولة عبره تلقائياً."))
     if "unsupported url" in low:
         hints.append("الرابط غير مدعوم أو لا يحتوي على وسائط قابلة للاستخراج.")
     if "js runtime" in low or "javascript runtime" in low:
@@ -345,6 +353,28 @@ def clean_err(e):
     if "requested format is not available" in low:
         hints.append("هذه الجودة لم تعد متاحة. اضغط «عرض الجودات» مجدداً واختر غيرها.")
     return msg + ("\n\n" + "\n".join(hints) if hints else "")
+
+
+NET_ERRORS = (
+    "failed to resolve", "getaddrinfo", "name or service not known", "nodename nor servname", "no address associated",
+    "temporary failure in name resolution", "connection refused", "connection reset", "connection aborted",
+    "remote end closed", "timed out", "timeout", "network is unreachable", "unable to connect", "eof occurred",
+    "ssl: ", "certificate verify failed", "not available in your country", "geo restrict", "geo-restrict",
+    "blocked", "http error 451", "http error 403: forbidden", "proxy",
+)
+
+
+def is_network_error(msg):
+    low = str(msg).lower()
+    return any(k in low for k in NET_ERRORS)
+
+
+def proxy_value():
+    return str(SETTINGS.get("proxy") or "").strip()
+
+
+def proxy_fallback_on():
+    return bool(proxy_value()) and SETTINGS.get("proxy_mode", "fallback") == "fallback"
 
 
 def parse_time(s):
@@ -394,6 +424,8 @@ def base_opts(req, logger=None):
     }
     if logger:
         opts["logger"] = logger
+    if proxy_value() and (req.get("_use_proxy") or SETTINGS.get("proxy_mode") == "always"):
+        opts["proxy"] = proxy_value()
     if FFMPEG:
         opts["ffmpeg_location"] = FFMPEG
     if JS_RUNTIMES:
@@ -456,6 +488,18 @@ def fmt_row(f, duration):
 
 
 def get_info(req):
+    try:
+        return _get_info(req)
+    except Exception as e:  # noqa: BLE001
+        if req.get("_use_proxy") or not proxy_fallback_on() or not is_network_error(e):
+            raise
+        log(f"[proxy] info failed directly ({str(e)[:120]}), retrying through proxy")
+        info = _get_info({**req, "_use_proxy": True})
+        info["via_proxy"] = True
+        return info
+
+
+def _get_info(req):
     url = (req.get("url") or "").strip()
     if not url:
         raise ValueError("ضع رابطاً أولاً.")
@@ -729,19 +773,45 @@ def run_job(job_id):
                 job.update(status="processing", stage=names[d["postprocessor"]])
 
     try:
-        logger = JobLogger(job)
-        opts = build_download_opts(req, job, logger)
-        opts["progress_hooks"] = [progress_hook]
-        opts["postprocessor_hooks"] = [pp_hook]
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.add_post_processor(HistoryPP(ydl, job), when="after_move")
-            code = ydl.download([req["url"]])
+        attempt_req, crash = req, None
+        for attempt in (1, 2):
+            logger = JobLogger(job)
+            crash = None
+            try:
+                opts = build_download_opts(attempt_req, job, logger)
+                opts["progress_hooks"] = [progress_hook]
+                opts["postprocessor_hooks"] = [pp_hook]
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.add_post_processor(HistoryPP(ydl, job), when="after_move")
+                    code = ydl.download([attempt_req["url"]])
+            except Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                if job.get("cancel") or "Cancelled" in type(e).__name__:
+                    raise Cancelled() from e
+                code, crash = 1, e
+            failed_text = " ".join(job.get("errors") or []) + " " + str(crash or "")
+            if (attempt == 1 and not attempt_req.get("_use_proxy") and proxy_fallback_on()
+                    and (code or job.get("failed")) and is_network_error(failed_text)):
+                log(f"[proxy] job {job_id} failed directly, retrying through proxy")
+                with JOBS_LOCK:
+                    job.update(status="starting", stage="فشل الاتصال المباشر — إعادة المحاولة عبر البروكسي…",
+                               via_proxy=True, failed=0, errors=[], percent=0, speed=None, eta=None)
+                attempt_req = {**req, "_use_proxy": True}
+                if job.get("many"):
+                    attempt_req["skip"] = True  # only what failed; finished items are in the archive
+                continue
+            if attempt_req.get("_use_proxy") or (proxy_value() and SETTINGS.get("proxy_mode") == "always"):
+                job["via_proxy"] = True
+            break
         with JOBS_LOCK:
             n, sk, fl = job.get("done_count", 0), job.get("skipped", 0), job.get("failed", 0)
             many = req.get("playlist") or req.get("sub_id")
-            if code and not n and not sk:
+            if crash is not None and not n:
+                job.update(status="error", stage="فشل", error=clean_err(crash), speed=None, eta=None)
+            elif code and not n and not sk:
                 job.update(status="error", stage="فشل",
-                           error="\n".join(job.get("errors") or ["تعذّر التنزيل."]))
+                           error=clean_err("\n".join(job.get("errors") or ["تعذّر التنزيل."])))
             elif code or fl:
                 job.update(status="done", stage="اكتمل مع ملاحظات", percent=100, speed=None, eta=None,
                            error="تعذّر تنزيل بعض العناصر (قد تكون خاصة أو محذوفة أو تتطلب تسجيل دخول):\n"
@@ -1042,6 +1112,63 @@ def history_delete(key=None, date=None, everything=False):
     return {"ok": True}
 
 
+def pick_folder(initial=""):
+    """Native 'choose folder' dialog on the user's computer. Returns a path or None if cancelled."""
+    initial = initial if initial and os.path.isdir(initial) else str(Path.home())
+    title = "اختر مجلد حفظ التنزيلات"
+    try:
+        if SYSTEM == "Windows":
+            def q(x):
+                return "'" + str(x).replace("'", "''") + "'"
+            ps = ("Add-Type -AssemblyName System.Windows.Forms;"
+                  "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+                  "$f=New-Object System.Windows.Forms.FolderBrowserDialog;"
+                  f"$f.Description={q(title)};$f.SelectedPath={q(initial)};$f.ShowNewFolderButton=$true;"
+                  "try{$f.UseDescriptionForTitle=$true}catch{};"
+                  "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false};"
+                  "if($f.ShowDialog($o) -eq 'OK'){Write-Output $f.SelectedPath}")
+            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+            r = subprocess.run(["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+                               capture_output=True, timeout=600, creationflags=0x08000000)
+            out = r.stdout.decode("utf-8", "replace").strip()
+        elif SYSTEM == "Darwin":
+            esc = initial.replace('"', '\\"')
+            script = (f'set f to choose folder with prompt "{title}" default location (POSIX file "{esc}")\n'
+                      'POSIX path of f')
+            r = subprocess.run(["osascript", "-e", 'tell application "System Events" to activate', "-e", script],
+                               capture_output=True, timeout=600)
+            out = r.stdout.decode("utf-8", "replace").strip()
+        else:
+            out = ""
+            for cmd in (["zenity", "--file-selection", "--directory", f"--title={title}", f"--filename={initial}/"],
+                        ["kdialog", "--getexistingdirectory", initial, "--title", title]):
+                if shutil.which(cmd[0]):
+                    out = subprocess.run(cmd, capture_output=True, timeout=600).stdout.decode("utf-8", "replace").strip()
+                    break
+            else:
+                raise ValueError("لا تتوفر نافذة اختيار المجلدات على هذا النظام؛ اكتب المسار يدوياً.")
+    except subprocess.TimeoutExpired:
+        return None
+    out = out.rstrip("/\\") or out
+    return out if out and os.path.isdir(out) else None
+
+
+def proxy_test(proxy):
+    proxy = str(proxy or "").strip()
+    if not proxy:
+        raise ValueError("اكتب عنوان البروكسي أولاً.")
+    if not re.match(r"^(https?|socks4a?|socks5h?)://", proxy, re.I):
+        raise ValueError("عنوان البروكسي يجب أن يبدأ بـ http:// أو https:// أو socks5://")
+    t = time.time()
+    try:
+        with yt_dlp.YoutubeDL({"proxy": proxy, "quiet": True, "no_warnings": True, "socket_timeout": 15}) as ydl:
+            ydl.urlopen("https://www.gstatic.com/generate_204").read()
+    except Exception as e:  # noqa: BLE001
+        raise ValueError("تعذّر الاتصال عبر هذا البروكسي. تأكد من العنوان والمنفذ (واسم المستخدم وكلمة المرور إن وُجدت) وأنه يعمل.\n"
+                         + ANSI.sub("", str(e))[:200]) from e
+    return {"ok": True, "ms": int((time.time() - t) * 1000)}
+
+
 def public_job(j):
     return {k: v for k, v in j.items() if not k.startswith("_")}
 
@@ -1085,7 +1212,7 @@ def ext_download(req):
 
 # ---------------------------------------------------------------- web server
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MODownloader/2.1"
+    server_version = "MODownloader/2.2"
 
     def log_message(self, *_):
         pass
@@ -1249,6 +1376,11 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/open":
                 open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")))
                 return self._send(200, {"ok": True})
+            if p == "/api/pick_folder":
+                path = pick_folder(req.get("initial") or SETTINGS["outdir"])
+                return self._send(200, {"path": path} if path else {"cancelled": True})
+            if p == "/api/proxy_test":
+                return self._send(200, proxy_test(req.get("proxy")))
             if p == "/api/ext_folder":
                 dst = export_extension()
                 open_path(dst)
@@ -1280,6 +1412,13 @@ class Handler(BaseHTTPRequestHandler):
                     changed["check_hours"] = max(0.5, min(168, float(req["check_hours"])))
                 if "cookies" in req:
                     changed["cookies"] = str(req["cookies"] or "")
+                if "proxy" in req:
+                    pv = str(req["proxy"] or "").strip()
+                    if pv and not re.match(r"^(https?|socks4a?|socks5h?)://", pv, re.I):
+                        raise ValueError("عنوان البروكسي يجب أن يبدأ بـ http:// أو https:// أو socks5://")
+                    changed["proxy"] = pv
+                if req.get("proxy_mode") in ("fallback", "always"):
+                    changed["proxy_mode"] = req["proxy_mode"]
                 SETTINGS.update(changed)
                 save_settings()
                 if "autostart" in req:
@@ -1489,6 +1628,10 @@ td.ltr{text-align:right}
 .toggle{display:flex;gap:8px;align-items:center}
 .settings .opt{margin-bottom:6px}
 .help{color:var(--muted);font-size:13px;margin-top:4px}
+.pathrow{display:flex;gap:6px;align-items:center}
+.pathrow input{flex:1;min-width:0}
+.opt.wide2{grid-column:span 2}
+@media (max-width:640px){.opt.wide2{grid-column:auto}}
 footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
 @media (max-width:640px){.media{flex-direction:column}.thumb{width:100%}}
 </style>
@@ -1714,6 +1857,23 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       <div id="cmsg" class="msg hidden"></div>
     </section>
 
+    <section class="card">
+      <h2>البروكسي (عند تعذّر الوصول إلى موقع)</h2>
+      <p class="sub">إذا فشل الاتصال المباشر بموقع، تعيد الأداة المحاولة تلقائياً عبر البروكسي، في عرض الجودات وفي التنزيل.</p>
+      <div class="opts">
+        <div class="opt wide2"><label>عنوان البروكسي</label>
+          <input type="text" id="proxy" class="ltr" spellcheck="false" placeholder="http://host:port   أو   socks5://user:pass@host:port"></div>
+        <div class="opt"><label>متى يُستخدم</label>
+          <select id="proxyMode">
+            <option value="fallback">عند فشل الاتصال المباشر فقط (موصى به)</option>
+            <option value="always">دائماً لكل التنزيلات</option>
+          </select></div>
+      </div>
+      <div class="go"><span class="pick" id="pmsg"></span>
+        <span class="row"><button class="small" id="proxyTest">اختبار البروكسي</button><button class="primary" id="proxySave">حفظ</button></span></div>
+      <p class="help">الأنواع المدعومة: http و https و socks5. اترك الخانة فارغة لإيقاف البروكسي. قص جزء من الفيديو لا يعمل عبر بروكسي socks5.</p>
+    </section>
+
     <section class="card" id="extcard">
       <h2>إضافة المتصفح</h2>
       <p class="sub">تُظهر زر تنزيل فوق أي فيديو في المتصفح، وزراً في شريط الأدوات، وخياراً في قائمة الزر الأيمن، بدون نسخ أي رابط.</p>
@@ -1860,11 +2020,14 @@ async function loadStatus() {
     if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
     box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
     box.append(el("span", {class: "pill " + (s.js.length ? "ok" : "bad"), text: s.js.length ? "JS ✓" : "Deno غير موجود (يوتيوب محدود)"}));
+    if (s.settings.proxy) box.append(el("span", {class: "pill", text: "بروكسي: " + (s.settings.proxy_mode === "always" ? "دائماً" : "عند الفشل")}));
     if (s.settings.cookies) box.append(el("span", {class: "pill", text: "كوكيز: " + (s.settings.cookies === "file" ? "ملف" : s.settings.cookies)}));
     for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) if (!$(id).value) $(id).value = s.settings.outdir;
     $("setOutdir").value = s.settings.outdir; $("setParallel").value = String(s.settings.max_parallel);
     $("setHours").value = String(+s.settings.check_hours); $("setAuto").checked = !!s.settings.autostart;
     $("cookies").value = s.settings.cookies || ""; cookieUI();
+    if (document.activeElement !== $("proxy")) $("proxy").value = s.settings.proxy || "";
+    $("proxyMode").value = s.settings.proxy_mode || "fallback";
     const ab = $("about"); ab.textContent = "";
     ab.append("الإصدار " + s.app + " · محرك التنزيل ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
       s.frozen ? " (يُحدَّث تلقائياً يومياً)" : " (يُحدَّث عند كل تشغيل)", el("br"), "مجلد الحفظ: ",
@@ -1909,7 +2072,7 @@ async function analyze() {
   showMsg("msg", "جارٍ قراءة الصفحة واستخراج كل الجودات…", "loading");
   try {
     const info = await api("/api/info", { url, playlist: $("playlist").checked });
-    S.info = info; showMsg("msg", "");
+    S.info = info; showMsg("msg", info.via_proxy ? "تعذّر الاتصال المباشر بالموقع، فتم الوصول إليه عبر البروكسي." : "", "info");
     if (info.type === "playlist") renderPlaylist(info); else renderVideo(info);
   } catch (e) { showMsg("msg", e.message); }
   finally { $("analyze").disabled = false; }
@@ -2187,6 +2350,7 @@ function renderJobs(jobs) {
     s.append(el("span", {text: j.stage || ""}));
     if (j.label) s.append(el("span", {class: "badge", text: j.label}));
     if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
+    if (j.via_proxy) s.append(el("span", {class: "badge", text: "عبر البروكسي"}));
     if (j.many) {
       if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
       if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
@@ -2237,6 +2401,43 @@ $("quit").onclick = async () => {
   clearTimeout(pollTimer);
   document.querySelector(".wrap").innerHTML = '<div class="card" style="margin-top:40px;text-align:center"><h2 style="margin:0 0 6px">تم إيقاف MO Downloader</h2><p class="sub">يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.</p></div>';
 };
+// ---------- folder pickers
+function addBrowse(id, onPick) {
+  const inp = $(id), wrap = el("div", {class: "pathrow"});
+  inp.parentNode.insertBefore(wrap, inp);
+  const b = el("button", {class: "small", type: "button", text: "تصفّح…", title: "اختيار مجلد"});
+  wrap.append(inp, b);
+  b.onclick = async () => {
+    b.disabled = true; const t = b.textContent; b.textContent = "…";
+    try {
+      const r = await api("/api/pick_folder", { initial: inp.value });
+      if (r.path) { inp.value = r.path; if (onPick) await onPick(r.path); }
+    } catch (e) { inp.title = e.message; }
+    finally { b.disabled = false; b.textContent = t; }
+  };
+}
+for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) addBrowse(id);
+addBrowse("setOutdir", async (path) => {
+  await api("/api/settings", { outdir: path });
+  for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) $(id).value = path;
+  $("setmsg").textContent = "✓ تم حفظ مجلد الحفظ الجديد"; setTimeout(() => $("setmsg").textContent = "", 3000);
+  loadStatus();
+});
+
+// ---------- proxy
+$("proxySave").onclick = async () => {
+  try {
+    await api("/api/settings", { proxy: $("proxy").value.trim(), proxy_mode: $("proxyMode").value });
+    $("pmsg").textContent = $("proxy").value.trim() ? "✓ تم الحفظ" : "✓ تم إيقاف البروكسي"; loadStatus();
+  } catch (e) { $("pmsg").textContent = e.message; }
+};
+$("proxyTest").onclick = async () => {
+  $("pmsg").textContent = "جارٍ الاختبار…";
+  try { const r = await api("/api/proxy_test", { proxy: $("proxy").value.trim() });
+        $("pmsg").textContent = "✓ البروكسي يعمل (" + r.ms + " ms)"; }
+  catch (e) { $("pmsg").textContent = "✗ " + e.message.split("\n")[0]; }
+};
+
 $("extExport").onclick = async () => {
   try { const r = await api("/api/ext_folder", {}); $("extPath").textContent = "✓ " + r.path; }
   catch (e) { $("extPath").textContent = e.message; }

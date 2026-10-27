@@ -107,6 +107,10 @@ td.ltr{text-align:right}
 .toggle{display:flex;gap:8px;align-items:center}
 .settings .opt{margin-bottom:6px}
 .help{color:var(--muted);font-size:13px;margin-top:4px}
+.pathrow{display:flex;gap:6px;align-items:center}
+.pathrow input{flex:1;min-width:0}
+.opt.wide2{grid-column:span 2}
+@media (max-width:640px){.opt.wide2{grid-column:auto}}
 footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
 @media (max-width:640px){.media{flex-direction:column}.thumb{width:100%}}
 </style>
@@ -332,6 +336,23 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       <div id="cmsg" class="msg hidden"></div>
     </section>
 
+    <section class="card">
+      <h2>البروكسي (عند تعذّر الوصول إلى موقع)</h2>
+      <p class="sub">إذا فشل الاتصال المباشر بموقع، تعيد الأداة المحاولة تلقائياً عبر البروكسي، في عرض الجودات وفي التنزيل.</p>
+      <div class="opts">
+        <div class="opt wide2"><label>عنوان البروكسي</label>
+          <input type="text" id="proxy" class="ltr" spellcheck="false" placeholder="http://host:port   أو   socks5://user:pass@host:port"></div>
+        <div class="opt"><label>متى يُستخدم</label>
+          <select id="proxyMode">
+            <option value="fallback">عند فشل الاتصال المباشر فقط (موصى به)</option>
+            <option value="always">دائماً لكل التنزيلات</option>
+          </select></div>
+      </div>
+      <div class="go"><span class="pick" id="pmsg"></span>
+        <span class="row"><button class="small" id="proxyTest">اختبار البروكسي</button><button class="primary" id="proxySave">حفظ</button></span></div>
+      <p class="help">الأنواع المدعومة: http و https و socks5. اترك الخانة فارغة لإيقاف البروكسي. قص جزء من الفيديو لا يعمل عبر بروكسي socks5.</p>
+    </section>
+
     <section class="card" id="extcard">
       <h2>إضافة المتصفح</h2>
       <p class="sub">تُظهر زر تنزيل فوق أي فيديو في المتصفح، وزراً في شريط الأدوات، وخياراً في قائمة الزر الأيمن، بدون نسخ أي رابط.</p>
@@ -478,11 +499,14 @@ async function loadStatus() {
     if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
     box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
     box.append(el("span", {class: "pill " + (s.js.length ? "ok" : "bad"), text: s.js.length ? "JS ✓" : "Deno غير موجود (يوتيوب محدود)"}));
+    if (s.settings.proxy) box.append(el("span", {class: "pill", text: "بروكسي: " + (s.settings.proxy_mode === "always" ? "دائماً" : "عند الفشل")}));
     if (s.settings.cookies) box.append(el("span", {class: "pill", text: "كوكيز: " + (s.settings.cookies === "file" ? "ملف" : s.settings.cookies)}));
     for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) if (!$(id).value) $(id).value = s.settings.outdir;
     $("setOutdir").value = s.settings.outdir; $("setParallel").value = String(s.settings.max_parallel);
     $("setHours").value = String(+s.settings.check_hours); $("setAuto").checked = !!s.settings.autostart;
     $("cookies").value = s.settings.cookies || ""; cookieUI();
+    if (document.activeElement !== $("proxy")) $("proxy").value = s.settings.proxy || "";
+    $("proxyMode").value = s.settings.proxy_mode || "fallback";
     const ab = $("about"); ab.textContent = "";
     ab.append("الإصدار " + s.app + " · محرك التنزيل ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
       s.frozen ? " (يُحدَّث تلقائياً يومياً)" : " (يُحدَّث عند كل تشغيل)", el("br"), "مجلد الحفظ: ",
@@ -527,7 +551,7 @@ async function analyze() {
   showMsg("msg", "جارٍ قراءة الصفحة واستخراج كل الجودات…", "loading");
   try {
     const info = await api("/api/info", { url, playlist: $("playlist").checked });
-    S.info = info; showMsg("msg", "");
+    S.info = info; showMsg("msg", info.via_proxy ? "تعذّر الاتصال المباشر بالموقع، فتم الوصول إليه عبر البروكسي." : "", "info");
     if (info.type === "playlist") renderPlaylist(info); else renderVideo(info);
   } catch (e) { showMsg("msg", e.message); }
   finally { $("analyze").disabled = false; }
@@ -805,6 +829,7 @@ function renderJobs(jobs) {
     s.append(el("span", {text: j.stage || ""}));
     if (j.label) s.append(el("span", {class: "badge", text: j.label}));
     if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
+    if (j.via_proxy) s.append(el("span", {class: "badge", text: "عبر البروكسي"}));
     if (j.many) {
       if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
       if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
@@ -855,6 +880,43 @@ $("quit").onclick = async () => {
   clearTimeout(pollTimer);
   document.querySelector(".wrap").innerHTML = '<div class="card" style="margin-top:40px;text-align:center"><h2 style="margin:0 0 6px">تم إيقاف MO Downloader</h2><p class="sub">يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.</p></div>';
 };
+// ---------- folder pickers
+function addBrowse(id, onPick) {
+  const inp = $(id), wrap = el("div", {class: "pathrow"});
+  inp.parentNode.insertBefore(wrap, inp);
+  const b = el("button", {class: "small", type: "button", text: "تصفّح…", title: "اختيار مجلد"});
+  wrap.append(inp, b);
+  b.onclick = async () => {
+    b.disabled = true; const t = b.textContent; b.textContent = "…";
+    try {
+      const r = await api("/api/pick_folder", { initial: inp.value });
+      if (r.path) { inp.value = r.path; if (onPick) await onPick(r.path); }
+    } catch (e) { inp.title = e.message; }
+    finally { b.disabled = false; b.textContent = t; }
+  };
+}
+for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) addBrowse(id);
+addBrowse("setOutdir", async (path) => {
+  await api("/api/settings", { outdir: path });
+  for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) $(id).value = path;
+  $("setmsg").textContent = "✓ تم حفظ مجلد الحفظ الجديد"; setTimeout(() => $("setmsg").textContent = "", 3000);
+  loadStatus();
+});
+
+// ---------- proxy
+$("proxySave").onclick = async () => {
+  try {
+    await api("/api/settings", { proxy: $("proxy").value.trim(), proxy_mode: $("proxyMode").value });
+    $("pmsg").textContent = $("proxy").value.trim() ? "✓ تم الحفظ" : "✓ تم إيقاف البروكسي"; loadStatus();
+  } catch (e) { $("pmsg").textContent = e.message; }
+};
+$("proxyTest").onclick = async () => {
+  $("pmsg").textContent = "جارٍ الاختبار…";
+  try { const r = await api("/api/proxy_test", { proxy: $("proxy").value.trim() });
+        $("pmsg").textContent = "✓ البروكسي يعمل (" + r.ms + " ms)"; }
+  catch (e) { $("pmsg").textContent = "✗ " + e.message.split("\n")[0]; }
+};
+
 $("extExport").onclick = async () => {
   try { const r = await api("/api/ext_folder", {}); $("extPath").textContent = "✓ " + r.path; }
   catch (e) { $("extPath").textContent = e.message; }
