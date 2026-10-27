@@ -2,9 +2,9 @@
 """
 Build MO Downloader as a standalone app (no Python needed on the user's computer).
 
-  Windows : dist/MO-Downloader-Setup.exe   (installer; needs Inno Setup 6, else a .zip)
-  macOS   : dist/MO-Downloader-mac-<arch>.dmg
-  Linux   : dist/MO-Downloader-linux-<arch>.tar.gz
+  Windows : dist/MO-Downloader-<version>-Setup.exe   (installer; needs Inno Setup 6, else a .zip)
+  macOS   : dist/MO-Downloader-<version>-mac-<arch>.dmg
+  Linux   : dist/MO-Downloader-<version>-linux-<arch>.tar.gz
 
 Run it on the system you are building for:  python build-kit/build.py
 """
@@ -82,9 +82,9 @@ def main():
         if iscc:
             run(iscc, f"/DMyAppVersion={versions['app']}", f"/DSourceDir={out / NAME}", f"/DIconFile={ICO}",
                 f"/O{DIST}", KIT / "installer.iss")
-            print("\nDONE:", DIST / "MO-Downloader-Setup.exe")
+            print("\nDONE:", DIST / f"MO-Downloader-{versions['app']}-Setup.exe")
         else:
-            z = shutil.make_archive(str(DIST / f"MO-Downloader-windows-{ARCH}"), "zip", out, NAME)
+            z = shutil.make_archive(str(DIST / f"MO-Downloader-{versions['app']}-windows-{ARCH}"), "zip", out, NAME)
             print("\nInno Setup not found -> portable zip instead:", z)
     elif SYSTEM == "Darwin":
         app = out / f"{NAME}.app"
@@ -109,12 +109,12 @@ def main():
         stage.mkdir()
         shutil.copytree(app, stage / app.name, symlinks=True)
         os.symlink("/Applications", stage / "Applications")
-        dmg = DIST / f"MO-Downloader-mac-{ARCH}.dmg"
+        dmg = DIST / f"MO-Downloader-{versions['app']}-mac-{ARCH}.dmg"
         dmg.unlink(missing_ok=True)
         run("hdiutil", "create", "-volname", NAME, "-srcfolder", stage, "-ov", "-format", "UDZO", dmg)
         print("\nDONE:", dmg)
     else:
-        t = shutil.make_archive(str(DIST / f"MO-Downloader-linux-{ARCH}"), "gztar", out, NAME)
+        t = shutil.make_archive(str(DIST / f"MO-Downloader-{versions['app']}-linux-{ARCH}"), "gztar", out, NAME)
         print("\nDONE:", t)
 
 
