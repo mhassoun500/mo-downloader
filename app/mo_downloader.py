@@ -1,0 +1,2118 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+MO Downloader — محمّل الفيديو والصوت
+أداة محلية بواجهة عربية تعمل في المتصفح، مبنية على yt-dlp.
+
+المزايا: كل الجودات المتاحة، قص جزء من الفيديو، عدة روابط دفعة واحدة مع طابور تنزيل،
+سجل دائم مع تخطّي المكرر، متابعة القنوات والقوائم وتنزيل الجديد تلقائياً.
+
+التشغيل:  python mo_downloader.py          (أو --background لتشغيله بدون فتح المتصفح)
+"""
+import base64
+import importlib
+import json
+import os
+import platform
+import re
+import secrets
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import uuid
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+APP_NAME = "MO Downloader"
+APP_VERSION = "2.0"
+FROZEN = bool(getattr(sys, "frozen", False))
+BACKGROUND = "--background" in sys.argv
+DEFAULT_PORT = int(os.environ.get("MD_PORT", 8765))
+SYSTEM = platform.system()
+
+APP_DATA = Path.home() / ".media_downloader"
+APP_DATA.mkdir(parents=True, exist_ok=True)
+SETTINGS_FILE = APP_DATA / "settings.json"
+HISTORY_FILE = APP_DATA / "history.jsonl"
+ARCHIVE_FILE = APP_DATA / "archive.txt"
+SUBS_FILE = APP_DATA / "subscriptions.json"
+SUBS_DIR = APP_DATA / "subscriptions"
+ENGINE_DIR = APP_DATA / "engine"
+COOKIE_FILE = APP_DATA / "cookies.txt"
+LOG_FILE = APP_DATA / "log.txt"
+
+# Without a console (frozen app / pythonw) there is no stdout: write to a log file instead.
+if sys.stdout is None or sys.stderr is None:
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 2_000_000:
+            LOG_FILE.replace(LOG_FILE.with_suffix(".old.txt"))
+        _log = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or _log
+        sys.stderr = sys.stderr or _log
+    except OSError:
+        pass
+
+
+def log(*a):
+    try:
+        print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def save_json(path, data):
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(path)
+
+
+DEFAULT_SETTINGS = {
+    "outdir": str(Path.home() / "Downloads" / "MO Downloader"),
+    "max_parallel": 2,
+    "check_hours": 6,
+    "autostart": False,
+    "cookies": "",
+    "engine_checked": 0,
+}
+SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
+SETTINGS_LOCK = threading.Lock()
+
+
+def save_settings():
+    with SETTINGS_LOCK:
+        save_json(SETTINGS_FILE, SETTINGS)
+
+
+# ---------------------------------------------------------------- download engine
+def _ver_key(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v))) or (0,)
+
+
+def _wheel_version(p):
+    m = re.match(r"^[A-Za-z0-9_]+-([^-]+)-", Path(p).name)
+    return m.group(1) if m else "0"
+
+
+def bundled_versions():
+    """Versions baked into a standalone build (written by the build script)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return load_json(base / "engine_version.json", {})
+
+
+def use_downloaded_engine():
+    """Standalone builds can't pip-upgrade, so newer engine wheels are downloaded to ENGINE_DIR
+    and put first on sys.path (pure-python wheels import fine straight from the zip)."""
+    if not FROZEN or not ENGINE_DIR.exists():
+        return
+    bundled = bundled_versions()
+    for prefix, key in (("yt_dlp_ejs", "yt-dlp-ejs"), ("yt_dlp", "yt-dlp")):
+        wheels = sorted(ENGINE_DIR.glob(f"{prefix}-[0-9]*.whl"), key=lambda p: _ver_key(_wheel_version(p)))
+        for old in wheels[:-1]:
+            old.unlink(missing_ok=True)
+        if wheels:
+            w = wheels[-1]
+            if _ver_key(_wheel_version(w)) <= _ver_key(bundled.get(key, "0")):
+                w.unlink(missing_ok=True)  # the app itself was updated to something newer
+            else:
+                sys.path.insert(0, str(w))
+
+
+def ensure(pip_name, module=None, required=True):
+    module = module or pip_name
+    try:
+        return importlib.import_module(module)
+    except ImportError:
+        if FROZEN:
+            if required:
+                raise
+            return None
+        log(f"[setup] installing {pip_name} ...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "--quiet", pip_name])
+            importlib.invalidate_caches()
+            return importlib.import_module(module)
+        except Exception as e:  # noqa: BLE001
+            if required:
+                log(f"[setup] failed to install {pip_name}: {e}")
+                sys.exit(1)
+            log(f"[setup] optional package {pip_name} unavailable: {e}")
+            return None
+
+
+use_downloaded_engine()
+try:
+    yt_dlp = ensure("yt-dlp[default]", "yt_dlp")
+except Exception:  # noqa: BLE001  — a broken downloaded wheel must never brick the app
+    if not FROZEN:
+        raise
+    for k in [k for k in sys.modules if k == "yt_dlp" or k.startswith("yt_dlp.")]:
+        del sys.modules[k]
+    sys.path[:] = [p for p in sys.path if not p.endswith(".whl")]
+    shutil.rmtree(ENGINE_DIR, ignore_errors=True)
+    import yt_dlp  # noqa: E402
+ensure("yt-dlp-ejs", "yt_dlp_ejs", required=False)
+from yt_dlp.postprocessor.common import PostProcessor  # noqa: E402
+from yt_dlp.utils import download_range_func, match_filter_func  # noqa: E402
+
+ENGINE = {"version": yt_dlp.version.__version__, "pending": None}
+
+
+def find_ffmpeg():
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    mod = ensure("imageio-ffmpeg", "imageio_ffmpeg", required=False)
+    if mod:
+        try:
+            exe = mod.get_ffmpeg_exe()
+            if exe and SYSTEM != "Windows" and not os.access(exe, os.X_OK):
+                os.chmod(exe, 0o755)
+            return exe
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
+def find_js_runtimes():
+    """YouTube needs an external JS runtime (Deno recommended) since yt-dlp 2025.11."""
+    runtimes = {}
+    deno = None
+    if FROZEN:  # the standalone build ships its own deno next to the app
+        cand = Path(getattr(sys, "_MEIPASS", ".")) / "deno_bin" / ("deno.exe" if SYSTEM == "Windows" else "deno")
+        if cand.exists():
+            deno = str(cand)
+            if SYSTEM != "Windows" and not os.access(deno, os.X_OK):
+                os.chmod(deno, 0o755)
+    deno = deno or shutil.which("deno")
+    if not deno:
+        mod = ensure("deno", "deno", required=False)
+        if mod and hasattr(mod, "find_deno_bin"):
+            try:
+                deno = mod.find_deno_bin()
+                if deno and SYSTEM != "Windows" and not os.access(deno, os.X_OK):
+                    os.chmod(deno, 0o755)
+            except Exception:  # noqa: BLE001
+                deno = None
+    if deno:
+        runtimes["deno"] = {"path": str(deno)}
+    node = shutil.which("node")
+    if node:
+        runtimes["node"] = {"path": node}
+    return runtimes
+
+
+FFMPEG = find_ffmpeg()
+JS_RUNTIMES = find_js_runtimes()
+TOKEN = secrets.token_urlsafe(16)
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def https_get(url, timeout=30):
+    custom = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE")  # e.g. company proxies
+    try:
+        if custom and os.path.exists(custom):
+            ctx = ssl.create_default_context(cafile=custom)
+        else:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        ctx = ssl.create_default_context()
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        return r.read()
+
+
+def engine_update_check():
+    """Standalone builds: fetch the newest yt-dlp from PyPI (at most once a day); used from next start."""
+    if not FROZEN:
+        return
+    if time.time() - float(SETTINGS.get("engine_checked") or 0) < 20 * 3600:
+        return
+    try:
+        ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+        pending = None
+        for name in ("yt-dlp", "yt-dlp-ejs"):
+            meta = json.loads(https_get(f"https://pypi.org/pypi/{name}/json"))
+            latest = meta["info"]["version"]
+            current = ENGINE["version"] if name == "yt-dlp" else bundled_versions().get(name, "0")
+            prefix = name.replace("-", "_")
+            have = [_wheel_version(p) for p in ENGINE_DIR.glob(f"{prefix}-[0-9]*.whl")]
+            if _ver_key(latest) <= _ver_key(current) or latest in have:
+                continue
+            files = [u for u in meta["urls"] if u["packagetype"] == "bdist_wheel" and u["filename"].endswith("-none-any.whl")]
+            if not files:
+                continue
+            data = https_get(files[0]["url"], timeout=120)
+            tmp = ENGINE_DIR / (files[0]["filename"] + ".part")
+            tmp.write_bytes(data)
+            tmp.replace(ENGINE_DIR / files[0]["filename"])
+            if name == "yt-dlp":
+                pending = latest
+        ENGINE["pending"] = pending
+        SETTINGS["engine_checked"] = time.time()
+        save_settings()
+        if pending:
+            log(f"[engine] downloaded yt-dlp {pending}; it will be used after restart")
+    except Exception as e:  # noqa: BLE001
+        log(f"[engine] update check failed: {e}")
+
+
+# ---------------------------------------------------------------- state
+JOBS = {}
+JOBS_LOCK = threading.RLock()
+QUEUE = threading.Condition(JOBS_LOCK)
+RUNNING = ("starting", "downloading", "processing")
+FINISHED = ("done", "error", "cancelled")
+
+HISTORY_LOCK = threading.Lock()
+HISTORY = []
+for _line in (HISTORY_FILE.read_text(encoding="utf-8").splitlines() if HISTORY_FILE.exists() else []):
+    try:
+        HISTORY.append(json.loads(_line))
+    except ValueError:
+        pass
+ARCHIVE = set(ARCHIVE_FILE.read_text(encoding="utf-8").split("\n")) - {""} if ARCHIVE_FILE.exists() else set()
+
+SUBS_LOCK = threading.RLock()
+SUBS = load_json(SUBS_FILE, [])
+SUBS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_subs():
+    with SUBS_LOCK:
+        save_json(SUBS_FILE, SUBS)
+
+
+def find_sub(sid):
+    return next((s for s in SUBS if s["id"] == sid), None)
+
+
+def sub_archive_path(sid):
+    return SUBS_DIR / f"{sid}.txt"
+
+
+def read_set(path):
+    return set(Path(path).read_text(encoding="utf-8").split("\n")) - {""} if Path(path).exists() else set()
+
+
+def append_line(path, line):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+class Cancelled(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- helpers
+def clean_err(e):
+    msg = ANSI.sub("", str(e)).strip()
+    msg = re.sub(r"^ERROR:\s*", "", msg)
+    if re.search(r"[؀-ۿ]", msg):  # our own Arabic message, already explains itself
+        return msg
+    hints = []
+    low = msg.lower()
+    if "drm" in low:
+        hints.append("هذا المحتوى محمي بتقنية منع النسخ ولا يمكن تنزيله.")
+    if "could not copy" in low and "cookie" in low:
+        hints.append("المتصفح مفتوح ويقفل ملف الكوكيز. أغلقه تماماً (من أيقونته بجانب الساعة أيضاً) ثم أعد المحاولة، "
+                     "أو الأفضل: اختر «ملف cookies.txt» أو Firefox من الإعدادات.")
+    elif "dpapi" in low or "decrypt" in low or "app-bound" in low or "app bound" in low:
+        hints.append("إصدارات Chrome وEdge الحديثة على ويندوز تشفّر الكوكيز بطريقة تمنع البرامج الأخرى من قراءتها. "
+                     "استخدم «ملف cookies.txt» أو Firefox من الإعدادات بدلاً منها.")
+    elif "sign in" in low or "login" in low or "cookies" in low or "confirm you" in low:
+        hints.append("الموقع يطلب تسجيل الدخول: اختر «ملف cookies.txt» أو Firefox من الإعدادات ثم أعد المحاولة.")
+    if "unsupported url" in low:
+        hints.append("الرابط غير مدعوم أو لا يحتوي على وسائط قابلة للاستخراج.")
+    if "js runtime" in low or "javascript runtime" in low:
+        hints.append("ثبّت Deno ثم أعد تشغيل الأداة.")
+    if "requested format is not available" in low:
+        hints.append("هذه الجودة لم تعد متاحة. اضغط «عرض الجودات» مجدداً واختر غيرها.")
+    return msg + ("\n\n" + "\n".join(hints) if hints else "")
+
+
+def parse_time(s):
+    s = str(s or "").strip().replace("٫", ".").translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) > 3 or not all(re.fullmatch(r"\d+(\.\d+)?", p) for p in parts):
+        raise ValueError(f"صيغة الوقت «{s}» غير صحيحة. اكتبه مثل 1:30 أو 1:02:45.")
+    sec = 0.0
+    for p in parts:
+        sec = sec * 60 + float(p)
+    return sec
+
+
+def fmt_hms(sec):
+    sec = int(round(sec))
+    h, m, s = sec // 3600, sec % 3600 // 60, sec % 60
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
+
+
+def safe_name(s, limit=80):
+    s = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(s or "")).strip(" .")
+    return (s[:limit] or "MO Downloader").replace("%", "%%")
+
+
+def outdir_of(req):
+    p = Path(os.path.expanduser(str(req.get("outdir") or SETTINGS["outdir"]).strip()))
+    if not p.is_absolute():
+        p = Path.home() / p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def base_opts(req, logger=None):
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": not req.get("playlist", False),
+        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "concurrent_fragment_downloads": 4,
+        "windowsfilenames": True,
+        "trim_file_name": 180,
+    }
+    if logger:
+        opts["logger"] = logger
+    if FFMPEG:
+        opts["ffmpeg_location"] = FFMPEG
+    if JS_RUNTIMES:
+        opts["js_runtimes"] = JS_RUNTIMES
+    browser = (req.get("cookies") if req.get("cookies") is not None else SETTINGS.get("cookies") or "").strip()
+    if browser == "file":
+        if not COOKIE_FILE.exists():
+            raise ValueError("اخترت «ملف cookies.txt» لكن لم تحمّل الملف بعد. حمّله من تبويب الإعدادات.")
+        opts["cookiefile"] = str(COOKIE_FILE)
+    elif browser:
+        opts["cookiesfrombrowser"] = (browser,)
+    return opts
+
+
+def archive_key(ydl, info):
+    try:
+        return ydl._make_archive_id(info)
+    except Exception:  # noqa: BLE001
+        ie = info.get("extractor_key") or info.get("ie_key") or ""
+        return f"{ie.lower()} {info.get('id')}" if info.get("id") else None
+
+
+def last_download(key):
+    if not key:
+        return None
+    with HISTORY_LOCK:
+        for h in reversed(HISTORY):
+            if h.get("key") == key:
+                return h
+    return None
+
+
+# ---------------------------------------------------------------- info
+def fmt_row(f, duration):
+    vc, ac = f.get("vcodec"), f.get("acodec")
+    if f.get("ext") == "mhtml" or (vc == "none" and ac == "none"):
+        return None
+    if vc == "none" or f.get("resolution") == "audio only":
+        kind = "audio"
+    elif ac == "none":
+        kind = "video"
+    else:
+        kind = "av"
+    size = f.get("filesize")
+    approx = False
+    if not size:
+        size = f.get("filesize_approx")
+        approx = bool(size)
+    if not size and f.get("tbr") and duration:
+        size = int(f["tbr"] * 125 * duration)
+        approx = True
+    return {
+        "id": str(f.get("format_id")), "kind": kind, "ext": f.get("ext"),
+        "height": f.get("height"), "width": f.get("width"), "fps": f.get("fps"),
+        "vcodec": vc, "acodec": ac, "tbr": f.get("tbr"), "abr": f.get("abr"), "vbr": f.get("vbr"),
+        "asr": f.get("asr"), "size": size, "approx": approx, "note": f.get("format_note") or "",
+        "proto": f.get("protocol") or "", "lang": f.get("language"),
+        "hdr": (f.get("dynamic_range") or "SDR") != "SDR",
+    }
+
+
+def get_info(req):
+    url = (req.get("url") or "").strip()
+    if not url:
+        raise ValueError("ضع رابطاً أولاً.")
+    opts = base_opts(req)
+    opts["extract_flat"] = "in_playlist"
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        info = ydl.sanitize_info(info)
+
+        if info.get("_type") == "playlist" or info.get("entries") is not None:
+            entries, done = [], 0
+            for e in info.get("entries") or []:
+                if not e:
+                    continue
+                seen = archive_key(ydl, e) in ARCHIVE
+                done += seen
+                entries.append({"title": e.get("title") or e.get("id") or "—", "duration": e.get("duration"),
+                                "url": e.get("webpage_url") or e.get("url"), "seen": seen})
+            return {"type": "playlist", "title": info.get("title") or "قائمة تشغيل",
+                    "uploader": info.get("uploader") or info.get("channel"), "site": info.get("extractor_key"),
+                    "count": len(entries), "already": done, "entries": entries[:500]}
+        key = archive_key(ydl, info)
+
+    duration = info.get("duration")
+    rows = [r for r in (fmt_row(f, duration) for f in info.get("formats") or [info]) if r]
+
+    def vkey(r):
+        return (r["height"] or 0, r["fps"] or 0, r["tbr"] or 0)
+
+    def akey(r):
+        return (r["abr"] or r["tbr"] or 0, r["asr"] or 0)
+
+    return {
+        "type": "video",
+        "title": info.get("title") or "بدون عنوان",
+        "uploader": info.get("uploader") or info.get("channel") or "",
+        "duration": duration,
+        "thumbnail": info.get("thumbnail"),
+        "site": info.get("extractor_key"),
+        "webpage_url": info.get("webpage_url") or url,
+        "is_live": bool(info.get("is_live")),
+        "subtitles": sorted(set((info.get("subtitles") or {}).keys()))[:40],
+        "previous": last_download(key),
+        "formats": {
+            "av": sorted([r for r in rows if r["kind"] == "av"], key=vkey, reverse=True),
+            "video": sorted([r for r in rows if r["kind"] == "video"], key=vkey, reverse=True),
+            "audio": sorted([r for r in rows if r["kind"] == "audio"], key=akey, reverse=True),
+        },
+    }
+
+
+# ---------------------------------------------------------------- downloading
+class JobLogger:
+    def __init__(self, job):
+        self.job = job
+
+    def debug(self, msg):
+        msg = ANSI.sub("", str(msg))
+        with JOBS_LOCK:
+            if "has already been recorded in the archive" in msg:
+                self.job["skipped"] = self.job.get("skipped", 0) + 1
+            m = re.search(r"Downloading item (\d+) of (\d+)", msg)
+            if m:
+                self.job["item"] = f"{m.group(1)} / {m.group(2)}"
+
+    info = debug
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        with JOBS_LOCK:
+            self.job["failed"] = self.job.get("failed", 0) + 1
+            errs = self.job.setdefault("errors", [])
+            if len(errs) < 5:
+                errs.append(clean_err(msg).split("\n")[0][:300])
+
+
+class HistoryPP(PostProcessor):
+    """Runs after each finished file: writes the history entry and the 'already downloaded' archive."""
+
+    def __init__(self, ydl, job):
+        super().__init__(ydl)
+        self.job = job
+
+    def run(self, info):
+        try:
+            record_download(self._downloader, info, self.job)
+        except Exception as e:  # noqa: BLE001
+            log(f"[history] {e}")
+        return [], info
+
+
+def record_download(ydl, info, job):
+    fp = info.get("filepath") or info.get("_filename")
+    key = archive_key(ydl, info)
+    ext = (Path(fp).suffix.lstrip(".") if fp else info.get("ext") or "").lower()
+    height = info.get("height") or max((f.get("height") or 0 for f in info.get("requested_formats") or []), default=0)
+    if ext in ("mp3", "m4a", "opus", "flac", "wav", "ogg", "aac", "weba") or info.get("vcodec") == "none":
+        quality = f"صوت · {ext}"
+    else:
+        quality = f"{height}p · {ext}" if height else ext
+    entry = {
+        "key": key, "id": info.get("id"), "title": info.get("title") or info.get("id"),
+        "url": info.get("webpage_url") or info.get("original_url"), "file": fp, "quality": quality,
+        "size": os.path.getsize(fp) if fp and os.path.exists(fp) else None, "date": time.time(),
+        "uploader": info.get("uploader") or info.get("channel"), "duration": info.get("duration"),
+        "site": info.get("extractor_key"), "source": job.get("source_label") or "", "clip": job.get("clip") or "",
+    }
+    with HISTORY_LOCK:
+        HISTORY.append(entry)
+        append_line(HISTORY_FILE, json.dumps(entry, ensure_ascii=False))
+        if key and key not in ARCHIVE:
+            ARCHIVE.add(key)
+            append_line(ARCHIVE_FILE, key)
+    if key and job.get("sub_id"):
+        append_line(sub_archive_path(job["sub_id"]), key)
+    with JOBS_LOCK:
+        job["file"] = fp
+        job["done_count"] = job.get("done_count", 0) + 1
+        if not job.get("many") and info.get("title"):
+            job["title"] = info["title"]
+
+
+def build_download_opts(req, job, logger):
+    opts = base_opts(req, logger)
+    outdir = outdir_of(req)
+    job["outdir"] = str(outdir)
+    opts["paths"] = {"home": str(outdir)}
+    opts["continuedl"] = True
+    opts["overwrites"] = False
+
+    container = req.get("container") or "mp4"          # mp4 | mkv | original
+    audio_conv = req.get("audio_convert") or "original"  # original|mp3|m4a|opus|flac|wav
+    audio_q = str(req.get("audio_quality") or "0")       # 0 = best VBR, or kbps
+    want_subs = bool(req.get("subs"))
+    want_meta = req.get("meta", True)
+    pps = []
+
+    if req.get("mode") == "preset":
+        preset = str(req.get("preset") or "best")
+        if preset == "audio":
+            fmt, kind = "ba/b", "audio"
+            if audio_conv == "original":
+                audio_conv = "mp3"
+        else:
+            h = "" if preset == "best" else f"[height<={int(preset)}]"
+            fmt, kind = f"bv*{h}+ba[ext=m4a]/bv*{h}+ba/b{h}/bv*+ba/b", "av"
+    else:
+        fid = str(req.get("format_id"))
+        kind = req.get("kind") or "av"
+        if kind == "video":
+            fmt = f"{fid}+ba[ext=m4a]/{fid}+ba" if container == "mp4" else f"{fid}+ba"
+        else:
+            fmt = fid
+    opts["format"] = fmt
+
+    # --- clip (feature: download only part of the video)
+    start, end = parse_time(req.get("clip_start")), parse_time(req.get("clip_end"))
+    clip_suffix = ""
+    if start is not None or end is not None:
+        if req.get("playlist"):
+            raise ValueError("قص جزء متاح للفيديو الواحد فقط، وليس للقوائم.")
+        start = start or 0.0
+        if end is not None and end <= start:
+            raise ValueError("وقت النهاية يجب أن يكون بعد وقت البداية.")
+        if not FFMPEG:
+            raise ValueError("قص الفيديو يحتاج ffmpeg.")
+        opts["download_ranges"] = download_range_func(None, [(start, end if end is not None else float("inf"))])
+        opts["force_keyframes_at_cuts"] = bool(req.get("clip_precise"))
+        job["clip"] = f"{fmt_hms(start)} → {fmt_hms(end) if end is not None else 'النهاية'}"
+        clip_suffix = f" (مقطع {fmt_hms(start)}-{fmt_hms(end) if end is not None else 'end'})"
+
+    # --- file names
+    quality_part = "" if kind == "audio" else "%(height& {}p|)s"
+    name = f"%(title).150B [%(id)s]{quality_part}{clip_suffix}.%(ext)s"
+    if req.get("sub_id"):
+        folder = safe_name(req.get("folder") or "Channel")
+        opts["outtmpl"] = {"default": f"{folder}/%(upload_date>%Y-%m-%d&{{}} - |)s{name}"}
+    elif req.get("playlist"):
+        # a whole list -> "<list name>/007 - title"
+        opts["outtmpl"] = {"default": f"%(playlist_title,playlist_id|Playlist)s/%(playlist_index&{{:03d}} - |)s{name}"}
+    else:
+        # never start the template with a field that can be empty followed by "/" — that makes an absolute path
+        opts["outtmpl"] = {"default": name}
+
+    if req.get("playlist") or req.get("sub_id") or req.get("batch"):
+        opts["ignoreerrors"] = "only_download"  # a private/removed item must not stop the rest
+    if req.get("playlistend"):
+        opts["playlistend"] = int(req["playlistend"])
+    if req.get("sub_id"):
+        opts["match_filter"] = match_filter_func("!is_live & live_status!=?is_upcoming & live_status!=?is_live")
+
+    # --- skip what was downloaded before
+    if req.get("skip"):
+        archive = set(ARCHIVE)
+        if req.get("sub_id"):
+            archive |= read_set(sub_archive_path(req["sub_id"]))
+        opts["download_archive"] = archive  # a set: yt-dlp checks it but we write the files ourselves
+
+    final_ext = None
+    if kind == "audio":
+        if audio_conv != "original":
+            pps.append({"key": "FFmpegExtractAudio", "preferredcodec": audio_conv,
+                        "preferredquality": audio_q, "nopostoverwrites": False})
+            final_ext = audio_conv
+    else:
+        if container in ("mp4", "mkv"):
+            opts["merge_output_format"] = container
+            pps.append({"key": "FFmpegVideoRemuxer", "preferedformat": container})
+            final_ext = container
+        if want_subs:
+            opts.update({
+                "writesubtitles": True, "writeautomaticsub": False,
+                "subtitleslangs": req.get("sub_langs") or ["ar", "ar-.*", "en", "en-.*"],
+                "subtitlesformat": "srt/vtt/best",
+            })
+            pps.append({"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"})
+            if final_ext in ("mp4", "mkv"):
+                pps.append({"key": "FFmpegEmbedSubtitle", "already_have_subtitle": True})
+
+    if want_meta:
+        pps.append({"key": "FFmpegMetadata", "add_metadata": True, "add_chapters": True})
+        if final_ext in ("mp4", "mkv", "mp3", "m4a", "flac", "opus"):
+            opts["writethumbnail"] = True
+            pps.append({"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"})
+            pps.append({"key": "EmbedThumbnail", "already_have_thumbnail": False})
+
+    if not FFMPEG:
+        opts["format"] = fmt if kind != "video" else "b"
+        pps = []
+    opts["postprocessors"] = pps
+    return opts
+
+
+def run_job(job_id):
+    job = JOBS[job_id]
+    req = job["_req"]
+
+    def check_cancel():
+        if job.get("cancel"):
+            raise Cancelled()
+
+    def progress_hook(d):
+        check_cancel()
+        info = d.get("info_dict") or {}
+        with JOBS_LOCK:
+            if info.get("title"):
+                job["current"] = info["title"]
+                if not job.get("many"):
+                    job["title"] = info["title"]
+            if d["status"] == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                done = d.get("downloaded_bytes") or 0
+                job.update(status="downloading", stage="جارٍ التنزيل", downloaded=done, total=total,
+                           speed=d.get("speed"), eta=d.get("eta"),
+                           percent=(done / total * 100) if total else None)
+            elif d["status"] == "finished":
+                job.update(stage="جارٍ المعالجة", percent=100, speed=None, eta=None)
+
+    def pp_hook(d):
+        check_cancel()
+        names = {
+            "Merger": "دمج الصورة والصوت", "FFmpegMerger": "دمج الصورة والصوت",
+            "FFmpegExtractAudio": "تحويل الصوت", "FFmpegVideoRemuxer": "تغيير الحاوية",
+            "EmbedThumbnail": "تضمين الصورة المصغّرة", "FFmpegMetadata": "إضافة البيانات",
+            "FFmpegEmbedSubtitle": "تضمين الترجمة", "FFmpegSubtitlesConvertor": "تحويل الترجمة",
+        }
+        with JOBS_LOCK:
+            if d["status"] == "started" and d.get("postprocessor") in names:
+                job.update(status="processing", stage=names[d["postprocessor"]])
+
+    try:
+        logger = JobLogger(job)
+        opts = build_download_opts(req, job, logger)
+        opts["progress_hooks"] = [progress_hook]
+        opts["postprocessor_hooks"] = [pp_hook]
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.add_post_processor(HistoryPP(ydl, job), when="after_move")
+            code = ydl.download([req["url"]])
+        with JOBS_LOCK:
+            n, sk, fl = job.get("done_count", 0), job.get("skipped", 0), job.get("failed", 0)
+            many = req.get("playlist") or req.get("sub_id")
+            if code and not n and not sk:
+                job.update(status="error", stage="فشل",
+                           error="\n".join(job.get("errors") or ["تعذّر التنزيل."]))
+            elif code or fl:
+                job.update(status="done", stage="اكتمل مع ملاحظات", percent=100, speed=None, eta=None,
+                           error="تعذّر تنزيل بعض العناصر (قد تكون خاصة أو محذوفة أو تتطلب تسجيل دخول):\n"
+                                 + "\n".join(job.get("errors") or []))
+            elif not n and sk:
+                job.update(status="done", stage="لا جديد — كل العناصر نُزّلت سابقاً" if many else "نُزّل سابقاً — تم التخطّي",
+                           percent=100, speed=None, eta=None)
+            else:
+                job.update(status="done", stage="اكتمل ✓", percent=100, speed=None, eta=None)
+    except Cancelled:
+        with JOBS_LOCK:
+            job.update(status="cancelled", stage="أُلغي", speed=None, eta=None)
+    except Exception as e:  # noqa: BLE001
+        with JOBS_LOCK:
+            if job.get("cancel") or "Cancelled" in type(e).__name__:
+                job.update(status="cancelled", stage="أُلغي", speed=None, eta=None)
+            else:
+                job.update(status="error", stage="فشل", error=clean_err(e), speed=None, eta=None)
+    finally:
+        job["finished"] = time.time()
+        if req.get("sub_id"):
+            sub_finished(req["sub_id"], job)
+        with QUEUE:
+            QUEUE.notify_all()
+
+
+def new_job(req, label="", source="single", source_label=""):
+    if not req.get("url"):
+        raise ValueError("الرابط مفقود.")
+    if req.get("clip_start") or req.get("clip_end"):  # validate early so the user sees the error now
+        a, b = parse_time(req.get("clip_start")), parse_time(req.get("clip_end"))
+        if b is not None and b <= (a or 0):
+            raise ValueError("وقت النهاية يجب أن يكون بعد وقت البداية.")
+    job_id = uuid.uuid4().hex[:10]
+    with QUEUE:
+        JOBS[job_id] = {
+            "id": job_id, "title": req.get("title") or req["url"], "url": req["url"], "status": "queued",
+            "stage": "في الطابور", "percent": 0, "created": time.time(), "label": label,
+            "source": source, "source_label": source_label, "sub_id": req.get("sub_id"),
+            "many": bool(req.get("playlist") or req.get("sub_id")), "_req": req,
+        }
+        QUEUE.notify_all()
+    return job_id
+
+
+def scheduler_loop():
+    while True:
+        with QUEUE:
+            QUEUE.wait(timeout=2)
+            running = sum(1 for j in JOBS.values() if j["status"] in RUNNING)
+            slots = max(1, min(6, int(SETTINGS.get("max_parallel") or 2))) - running
+            if slots <= 0:
+                continue
+            queued = sorted((j for j in JOBS.values() if j["status"] == "queued"), key=lambda j: j["created"])
+            for j in queued[:slots]:
+                j.update(status="starting", stage="جارٍ التحضير", started=time.time())
+                threading.Thread(target=run_job, args=(j["id"],), daemon=True).start()
+
+
+def batch_jobs(req):
+    text = req.get("urls") or ""
+    urls, seen = [], set()
+    for u in re.findall(r"https?://[^\s<>\"']+", text):
+        u = u.rstrip(").,،؛")
+        if u not in seen:
+            seen.add(u)
+            urls.append(u)
+    if not urls:
+        raise ValueError("لم أجد أي رابط. ضع كل رابط في سطر.")
+    label = {"best": "أفضل جودة", "audio": "صوت"}.get(str(req.get("preset")), f"حتى {req.get('preset')}p")
+    ids = []
+    for u in urls:
+        r = {k: v for k, v in req.items() if k != "urls"}
+        r.update(url=u, mode="preset", batch=True, playlist=bool(req.get("playlist")))
+        ids.append(new_job(r, label=f"دفعة · {label}", source="batch", source_label="دفعة روابط"))
+    return {"count": len(ids)}
+
+
+# ---------------------------------------------------------------- subscriptions (follow channels)
+YT_CHANNEL = re.compile(r"^/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)/?$")
+
+
+def normalize_sub_url(url):
+    url = url.strip()
+    u = urlparse(url)
+    host = (u.hostname or "").lower()
+    if host.endswith("youtube.com"):
+        if YT_CHANNEL.match(u.path):  # channel home -> its Videos tab (newest first, no shorts)
+            return f"https://www.youtube.com{u.path.rstrip('/')}/videos", True
+        if re.match(r"^/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)/(videos|streams|shorts)/?$", u.path):
+            return url, True
+        if u.path == "/watch" and "list" in parse_qs(u.query):
+            return f"https://www.youtube.com/playlist?list={parse_qs(u.query)['list'][0]}", False
+    return url, False
+
+
+def sub_add(req):
+    url, is_channel = normalize_sub_url(req.get("url") or "")
+    if not url.startswith("http"):
+        raise ValueError("ضع رابط قناة أو قائمة تشغيل.")
+    with SUBS_LOCK:
+        if any(s["url"] == url for s in SUBS):
+            raise ValueError("هذه القناة أو القائمة متابَعة بالفعل.")
+    start = str(req.get("start") or "new")
+    first_n = 0 if start == "new" else max(1, min(200, int(start)))
+    opts = base_opts({"playlist": True})
+    opts["extract_flat"] = "in_playlist"
+    if is_channel:
+        opts["playlistend"] = max(60, first_n + 30)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        if info.get("_type") != "playlist" and info.get("entries") is None:
+            raise ValueError("هذا رابط فيديو واحد. ضع رابط القناة أو قائمة التشغيل.")
+        entries = [e for e in (info.get("entries") or []) if e]
+        keys = [archive_key(ydl, e) for e in entries]
+    if not is_channel and first_n:  # ordinary playlists usually grow at the end: "latest" = last items
+        keys_seen = keys[:-first_n] if first_n < len(keys) else []
+    else:
+        keys_seen = keys[first_n:]
+    title = re.sub(r"\s+-\s+(Videos|Shorts|Live|Streams)$", "", info.get("title") or info.get("uploader") or "قناة")
+    sid = uuid.uuid4().hex[:8]
+    Path(sub_archive_path(sid)).write_text("".join(k + "\n" for k in keys_seen if k), encoding="utf-8")
+    sub = {
+        "id": sid, "url": url, "title": title, "channel": is_channel,
+        "uploader": info.get("uploader") or info.get("channel") or "", "site": info.get("extractor_key"),
+        "preset": str(req.get("preset") or "best"), "container": req.get("container") or "mp4",
+        "audio_convert": req.get("audio_convert") or "mp3", "outdir": req.get("outdir") or SETTINGS["outdir"],
+        "enabled": True, "added": time.time(), "last_check": None, "last_result": "", "last_new": None,
+        "total": 0, "first_n": first_n, "count_seen": len(entries),
+    }
+    with SUBS_LOCK:
+        SUBS.append(sub)
+        save_subs()
+    if first_n:
+        sub_check(sid)
+    else:
+        sub["last_check"] = time.time()
+        sub["last_result"] = "بدأت المتابعة — سيُنزَّل كل فيديو جديد"
+        save_subs()
+    return {"ok": True, "sub": sub}
+
+
+def sub_check(sid):
+    with SUBS_LOCK:
+        sub = find_sub(sid)
+        if not sub:
+            raise ValueError("المتابعة غير موجودة.")
+        with JOBS_LOCK:
+            if any(j.get("sub_id") == sid and j["status"] not in FINISHED for j in JOBS.values()):
+                return None
+        sub["last_check"] = time.time()
+        sub["last_result"] = "جارٍ الفحص…"
+        save_subs()
+        req = {
+            "url": sub["url"], "playlist": True, "mode": "preset", "preset": sub["preset"],
+            "container": sub["container"], "audio_convert": sub["audio_convert"], "outdir": sub["outdir"],
+            "skip": True, "sub_id": sid, "folder": sub["title"], "title": f"متابعة: {sub['title']}", "meta": True,
+        }
+        if sub.get("channel"):
+            req["playlistend"] = max(15, int(sub.get("first_n") or 0))
+        sub["first_n"] = 0
+    q = "صوت" if sub["preset"] == "audio" else ("أفضل جودة" if sub["preset"] == "best" else f"حتى {sub['preset']}p")
+    return new_job(req, label=f"متابعة · {q}", source="sub", source_label=f"متابعة: {sub['title']}")
+
+
+def sub_finished(sid, job):
+    with SUBS_LOCK:
+        sub = find_sub(sid)
+        if not sub:
+            return
+        n = job.get("done_count", 0)
+        if job["status"] == "error":
+            sub["last_result"] = "فشل الفحص: " + (job.get("error") or "")[:160]
+        elif job["status"] == "cancelled":
+            sub["last_result"] = "أُلغي الفحص"
+        elif n:
+            sub["last_result"] = f"نُزّل {n} جديد"
+            sub["last_new"] = time.time()
+            sub["total"] = sub.get("total", 0) + n
+        else:
+            sub["last_result"] = "لا جديد"
+        save_subs()
+
+
+def subs_loop():
+    time.sleep(40)
+    while True:
+        try:
+            hours = max(0.5, float(SETTINGS.get("check_hours") or 6))
+            for s in list(SUBS):
+                if s.get("enabled") and time.time() - float(s.get("last_check") or 0) >= hours * 3600:
+                    sub_check(s["id"])
+        except Exception as e:  # noqa: BLE001
+            log(f"[subs] {e}")
+        time.sleep(60)
+
+
+# ---------------------------------------------------------------- start with the computer
+def app_icon_path():
+    if FROZEN:
+        return sys.executable
+    return str(Path(__file__).with_name("mo_downloader.ico"))
+
+
+def mac_bundle():
+    b = os.environ.get("MO_APP_BUNDLE")
+    if b:
+        return b
+    m = re.search(r"^(.*?\.app)/Contents/", sys.executable)
+    return m.group(1) if (FROZEN and m) else None
+
+
+def set_autostart(on):
+    if SYSTEM == "Windows":
+        startup = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
+        lnk = startup / f"{APP_NAME}.lnk"
+        if not on:
+            lnk.unlink(missing_ok=True)
+        else:
+            if FROZEN:
+                target, args = sys.executable, "--background"
+            elif os.environ.get("MO_LAUNCHER"):
+                target, args = os.environ["MO_LAUNCHER"], "--background"
+            else:
+                pyw = Path(sys.executable).with_name("pythonw.exe")
+                target, args = str(pyw if pyw.exists() else sys.executable), f'"{Path(__file__).resolve()}" --background'
+
+            def q(s):
+                return "'" + str(s).replace("'", "''") + "'"
+            ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({q(lnk)});"
+                  f"$s.TargetPath={q(target)};$s.Arguments={q(args)};"
+                  f"$s.WorkingDirectory={q(Path(target).parent)};$s.IconLocation={q(app_icon_path())};"
+                  f"$s.WindowStyle=7;$s.Save()")
+            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+                           check=True, capture_output=True, creationflags=0x08000000)
+    elif SYSTEM == "Darwin":
+        plist = Path.home() / "Library/LaunchAgents/local.mo.downloader.plist"
+        if not on:
+            plist.unlink(missing_ok=True)
+        else:
+            bundle = mac_bundle()
+            args = (["/usr/bin/open", "-g", "-a", bundle, "--args", "--background"] if bundle
+                    else [sys.executable, str(Path(__file__).resolve()), "--background"])
+            import plistlib
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            with open(plist, "wb") as f:
+                plistlib.dump({"Label": "local.mo.downloader", "ProgramArguments": args, "RunAtLoad": True}, f)
+    else:
+        desk = Path.home() / ".config/autostart/mo-downloader.desktop"
+        if not on:
+            desk.unlink(missing_ok=True)
+        else:
+            desk.parent.mkdir(parents=True, exist_ok=True)
+            cmd = f'"{sys.executable}" "{Path(__file__).resolve()}" --background'
+            desk.write_text(f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nExec={cmd}\nX-GNOME-Autostart-enabled=true\n",
+                            encoding="utf-8")
+    SETTINGS["autostart"] = bool(on)
+    save_settings()
+
+
+# ---------------------------------------------------------------- misc
+def open_path(path, select=False):
+    p = Path(path)
+    if not p.exists():
+        p = p.parent if p.parent.exists() else Path(SETTINGS["outdir"])
+    if SYSTEM == "Windows":
+        if select and p.is_file():
+            subprocess.Popen(["explorer", "/select,", str(p)])
+        else:
+            os.startfile(str(p if p.is_dir() else p.parent))  # type: ignore[attr-defined]
+    elif SYSTEM == "Darwin":
+        subprocess.Popen(["open", "-R", str(p)] if select and p.is_file() else ["open", str(p)])
+    else:
+        subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+
+
+def history_query(q="", limit=300):
+    q = (q or "").strip().lower()
+    with HISTORY_LOCK:
+        items = list(reversed(HISTORY))
+    if q:
+        items = [h for h in items if q in " ".join(str(h.get(k) or "") for k in ("title", "uploader", "site", "url", "source")).lower()]
+    return {"total": len(HISTORY), "count": len(items), "items": items[:limit]}
+
+
+def history_delete(key=None, date=None, everything=False):
+    global HISTORY, ARCHIVE
+    with HISTORY_LOCK:
+        if everything:
+            HISTORY, ARCHIVE = [], set()
+        else:
+            HISTORY = [h for h in HISTORY if not (h.get("key") == key and (date is None or h.get("date") == date))]
+            if key and not any(h.get("key") == key for h in HISTORY):
+                ARCHIVE.discard(key)
+        HISTORY_FILE.write_text("".join(json.dumps(h, ensure_ascii=False) + "\n" for h in HISTORY), encoding="utf-8")
+        ARCHIVE_FILE.write_text("".join(k + "\n" for k in ARCHIVE), encoding="utf-8")
+    return {"ok": True}
+
+
+def public_job(j):
+    return {k: v for k, v in j.items() if not k.startswith("_")}
+
+
+# ---------------------------------------------------------------- web server
+class Handler(BaseHTTPRequestHandler):
+    server_version = "MODownloader/2.0"
+
+    def log_message(self, *_):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _authorized(self):
+        return self.headers.get("X-Token") == TOKEN
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+
+    def do_GET(self):  # noqa: N802
+        u = urlparse(self.path)
+        if u.path in ("/logo.png", "/favicon.ico"):
+            return self._send(200, LOGO_PNG, "image/png")
+        if u.path == "/api/ping":
+            return self._send(200, {"app": APP_NAME})
+        if u.path in ("/", "/index.html"):
+            html = PAGE.replace("__TOKEN__", TOKEN)
+            return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        if not self._authorized():
+            return self._send(403, {"error": "forbidden"})
+        qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/api/jobs":
+            with JOBS_LOCK:
+                jobs = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)[:200]
+                return self._send(200, {"jobs": [public_job(j) for j in jobs]})
+        if u.path == "/api/status":
+            return self._send(200, {
+                "app": APP_VERSION, "ytdlp": ENGINE["version"], "pending": ENGINE["pending"], "frozen": FROZEN,
+                "ffmpeg": bool(FFMPEG), "js": list(JS_RUNTIMES.keys()), "cookie_file": COOKIE_FILE.exists(),
+                "settings": {k: v for k, v in SETTINGS.items() if k != "engine_checked"},
+                "system": SYSTEM,
+            })
+        if u.path == "/api/history":
+            return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 300)))
+        if u.path == "/api/subs":
+            with SUBS_LOCK:
+                return self._send(200, {"subs": SUBS, "hours": SETTINGS.get("check_hours")})
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):  # noqa: N802
+        if not self._authorized():
+            return self._send(403, {"error": "forbidden"})
+        try:
+            req = self._body()
+            p = self.path
+            if p == "/api/info":
+                return self._send(200, get_info(req))
+            if p == "/api/download":
+                src = "playlist" if req.get("playlist") else "single"
+                return self._send(200, {"id": new_job(req, label=req.get("label") or "", source=src,
+                                                      source_label="قائمة تشغيل" if req.get("playlist") else "")})
+            if p == "/api/batch":
+                return self._send(200, batch_jobs(req))
+            if p == "/api/cancel":
+                with JOBS_LOCK:
+                    j = JOBS.get(req.get("id"))
+                    if j:
+                        j["cancel"] = True
+                        if j["status"] == "queued":
+                            j.update(status="cancelled", stage="أُلغي")
+                return self._send(200, {"ok": True})
+            if p == "/api/cancel_all":
+                with JOBS_LOCK:
+                    for j in JOBS.values():
+                        if j["status"] not in FINISHED:
+                            j["cancel"] = True
+                            if j["status"] == "queued":
+                                j.update(status="cancelled", stage="أُلغي")
+                return self._send(200, {"ok": True})
+            if p == "/api/retry":
+                with JOBS_LOCK:
+                    j = JOBS.get(req.get("id"))
+                if not j:
+                    raise ValueError("المهمة غير موجودة.")
+                return self._send(200, {"id": new_job(dict(j["_req"]), label=j.get("label", ""), source=j.get("source", "single"),
+                                                      source_label=j.get("source_label", ""))})
+            if p == "/api/clear":
+                with JOBS_LOCK:
+                    for k in [k for k, j in JOBS.items() if j["status"] in FINISHED]:
+                        del JOBS[k]
+                return self._send(200, {"ok": True})
+            if p == "/api/open":
+                open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")))
+                return self._send(200, {"ok": True})
+            if p == "/api/open_url":
+                u = str(req.get("url") or "")
+                if u.startswith(("http://", "https://")):
+                    webbrowser.open(u)
+                return self._send(200, {"ok": True})
+            if p == "/api/cookies":
+                if req.get("delete"):
+                    COOKIE_FILE.unlink(missing_ok=True)
+                    return self._send(200, {"ok": True, "has": False})
+                text = req.get("text")
+                if not text or "\t" not in text:
+                    raise ValueError("هذا ليس ملف كوكيز صالحاً. صدّره بصيغة Netscape (cookies.txt) من إضافة المتصفح.")
+                if not text.lstrip().startswith("#"):
+                    text = "# Netscape HTTP Cookie File\n" + text
+                COOKIE_FILE.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
+                n = sum(1 for ln in text.splitlines() if ln.count("\t") >= 6)
+                return self._send(200, {"ok": True, "has": True, "count": n})
+            if p == "/api/settings":
+                changed = {}
+                if "outdir" in req and str(req["outdir"]).strip():
+                    changed["outdir"] = str(Path(os.path.expanduser(str(req["outdir"]).strip())))
+                if "max_parallel" in req:
+                    changed["max_parallel"] = max(1, min(6, int(req["max_parallel"])))
+                if "check_hours" in req:
+                    changed["check_hours"] = max(0.5, min(168, float(req["check_hours"])))
+                if "cookies" in req:
+                    changed["cookies"] = str(req["cookies"] or "")
+                SETTINGS.update(changed)
+                save_settings()
+                if "autostart" in req:
+                    set_autostart(bool(req["autostart"]))
+                with QUEUE:
+                    QUEUE.notify_all()
+                return self._send(200, {"ok": True, "settings": SETTINGS})
+            if p == "/api/history/delete":
+                return self._send(200, history_delete(req.get("key"), req.get("date")))
+            if p == "/api/history/clear":
+                return self._send(200, history_delete(everything=True))
+            if p == "/api/subs/add":
+                return self._send(200, sub_add(req))
+            if p == "/api/subs/check":
+                ids = [s["id"] for s in SUBS if s.get("enabled")] if req.get("all") else [req.get("id")]
+                started = [sub_check(i) for i in ids]
+                return self._send(200, {"ok": True, "started": len([s for s in started if s])})
+            if p == "/api/subs/update":
+                with SUBS_LOCK:
+                    s = find_sub(req.get("id"))
+                    if not s:
+                        raise ValueError("المتابعة غير موجودة.")
+                    for k in ("enabled", "preset", "container", "audio_convert", "outdir"):
+                        if k in req:
+                            s[k] = req[k]
+                    save_subs()
+                return self._send(200, {"ok": True})
+            if p == "/api/subs/delete":
+                with SUBS_LOCK:
+                    SUBS[:] = [s for s in SUBS if s["id"] != req.get("id")]
+                    save_subs()
+                sub_archive_path(req.get("id")).unlink(missing_ok=True)
+                return self._send(200, {"ok": True})
+            if p == "/api/shutdown":
+                self._send(200, {"ok": True})
+                threading.Thread(target=SERVER.shutdown, daemon=True).start()
+                return None
+            self._send(404, {"error": "not found"})
+        except Exception as e:  # noqa: BLE001
+            self._send(400, {"error": clean_err(e)})
+
+
+def free_port(preferred):
+    for port in [preferred] + list(range(preferred + 1, preferred + 30)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    return 0
+
+
+def already_running(port):
+    """If MO Downloader is already open, just show it instead of starting a second copy."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1.5) as r:
+            return json.loads(r.read()).get("app") == APP_NAME
+    except Exception:  # noqa: BLE001
+        return False
+
+
+SERVER = None
+
+
+def main():
+    global SERVER
+    Path(SETTINGS["outdir"]).mkdir(parents=True, exist_ok=True)
+    if already_running(DEFAULT_PORT):
+        if not BACKGROUND:
+            log("MO Downloader is already running - opening it in the browser.")
+            webbrowser.open(f"http://127.0.0.1:{DEFAULT_PORT}/")
+        return
+    port = free_port(DEFAULT_PORT)
+    server = SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    for target in (scheduler_loop, subs_loop, engine_update_check):
+        threading.Thread(target=target, daemon=True).start()
+    print("=" * 60)
+    print(f"  MO Downloader {APP_VERSION} is running:  {url}")
+    print(f"  yt-dlp {ENGINE['version']} | ffmpeg: {'OK' if FFMPEG else 'MISSING'}"
+          f" | JS runtime: {', '.join(JS_RUNTIMES) or 'MISSING'}")
+    if FROZEN:
+        print(f"  engine: {Path(yt_dlp.__file__).parent}")
+    print(f"  Downloads folder: {SETTINGS['outdir']}")
+    print("  Close this window (or press the stop button in the page) to quit.")
+    print("=" * 60, flush=True)
+    if not BACKGROUND and not os.environ.get("MD_NO_BROWSER"):
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    log("MO Downloader stopped.")
+
+
+# ---------------------------------------------------------------- icon
+LOGO_PNG = base64.b64decode("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")
+
+# ---------------------------------------------------------------- page
+PAGE = r"""<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MO Downloader</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<style>
+:root{
+  --bg:#f4f1ea; --panel:#fffdf8; --ink:#1d1b16; --muted:#6b665b; --line:#e3ddcf;
+  --accent:#0f6b5c; --accent-ink:#ffffff; --accent-soft:#dcefe9; --bad:#b3261e; --bad-soft:#f6e0dd;
+  --warn:#9a5b00; --warn-soft:#fbefd9; --chip:#efe9dc; --shadow:0 1px 2px rgba(0,0,0,.05),0 8px 24px rgba(40,30,10,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#14130f; --panel:#1d1b16; --ink:#ece7dc; --muted:#a39d8f; --line:#332f27;
+    --accent:#3fb59c; --accent-ink:#0c1a16; --accent-soft:#1d332d; --bad:#ef7b72; --bad-soft:#3a1f1c;
+    --warn:#f0b35a; --warn-soft:#3a2d17; --chip:#2a2720; --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Segoe UI","Noto Naskh Arabic","Noto Sans Arabic",Tahoma,system-ui,sans-serif;font-size:15px;line-height:1.6}
+.wrap{max-width:1060px;margin:0 auto;padding:24px 16px 64px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+h1.brand{font-size:27px;margin:0;font-weight:800;display:flex;align-items:center;gap:10px}
+h1.brand img{border-radius:10px} h1.brand b{color:var(--accent);font-weight:800}
+.sub{color:var(--muted);margin:2px 0 0;font-size:14px}
+.status{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:12px;padding:3px 10px;border-radius:999px;background:var(--chip);color:var(--muted)}
+.pill.ok{background:var(--accent-soft);color:var(--accent)} .pill.bad{background:var(--bad-soft);color:var(--bad)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+nav{display:flex;gap:4px;margin:0 0 14px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:5px;overflow-x:auto}
+nav button{border:none;background:none;border-radius:10px;padding:8px 14px;color:var(--muted);font-weight:600;flex:none}
+nav button.on{background:var(--accent);color:var(--accent-ink)}
+nav .n{font-size:11.5px;background:var(--chip);color:var(--muted);border-radius:999px;padding:0 7px;margin-inline-start:5px}
+nav button.on .n{background:rgba(255,255,255,.25);color:inherit}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px}
+.card+.card{margin-top:16px}
+.card h2{font-size:18px;margin:0 0 4px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+input[type=text],input[type=number],select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);
+  border-radius:10px;padding:9px 12px;min-width:0}
+textarea{width:100%;min-height:150px;direction:ltr;text-align:left;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13.5px}
+input.ltr,#url{direction:ltr;text-align:left}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:9px 14px;white-space:nowrap}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.5;cursor:default}
+button.ghost{background:transparent} button.small{padding:4px 10px;font-size:13px}
+button.danger{color:var(--bad)} button.danger.armed{background:var(--bad);color:#fff;border-color:var(--bad)}
+.msg{margin-top:12px;padding:10px 12px;border-radius:10px;white-space:pre-wrap;font-size:14px}
+.msg.err{background:var(--bad-soft);color:var(--bad)} .msg.info{background:var(--chip);color:var(--muted)}
+.msg.ok{background:var(--accent-soft);color:var(--accent)} .msg.warn{background:var(--warn-soft);color:var(--warn)}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-left-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.media{display:flex;gap:16px;align-items:flex-start}
+.thumb{width:220px;aspect-ratio:16/9;border-radius:12px;object-fit:cover;background:var(--chip);flex:none}
+.meta h2{font-size:19px;margin:0 0 6px;line-height:1.45}
+.metarow{color:var(--muted);font-size:13.5px;display:flex;gap:12px;flex-wrap:wrap}
+.quick{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:18px 0 0;flex-wrap:wrap}
+.tab{border:none;border-bottom:2px solid transparent;border-radius:0;background:none;padding:10px 12px;color:var(--muted)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:700}
+.tab .n{font-size:12px;background:var(--chip);border-radius:999px;padding:0 7px;margin-inline-start:4px}
+.tablewrap{overflow-x:auto;max-height:360px;overflow-y:auto;border:1px solid var(--line);border-top:none;border-radius:0 0 12px 12px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:600;font-size:12.5px;z-index:1}
+tbody tr{cursor:pointer} tbody tr:hover{background:var(--chip)} tbody tr.sel{background:var(--accent-soft)}
+td.q{font-weight:700} td .tag{font-size:11px;background:var(--chip);padding:1px 6px;border-radius:6px;margin-inline-start:4px;font-weight:600}
+td.ltr,.ltr{direction:ltr;unicode-bidi:isolate}
+td.ltr{text-align:right}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:16px}
+.opt label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px}
+.opt select,.opt input{width:100%}
+.checks{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;font-size:14px}
+.checks label{display:flex;gap:6px;align-items:center}
+.clip{margin-top:14px;padding:12px;border:1px dashed var(--line);border-radius:12px}
+.clip .row input[type=text]{width:110px;direction:ltr;text-align:center}
+.go{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap}
+.go .pick{color:var(--muted);font-size:14px}
+.plist{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:12px}
+.plist div{padding:6px 12px;border-bottom:1px solid var(--line);font-size:14px;display:flex;justify-content:space-between;gap:10px}
+.plist div.seen{color:var(--muted)}
+.plist div span:last-child{color:var(--muted);flex:none}
+.list .item{padding:12px 0;border-top:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}
+.list .item:first-child{border-top:none}
+.item .body{flex:1;min-width:0}
+.item .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .s{color:var(--muted);font-size:13px;display:flex;gap:12px;flex-wrap:wrap;margin-top:2px}
+.item .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.item.off{opacity:.6}
+.bar{height:6px;background:var(--chip);border-radius:99px;overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .4s}
+.item.error .bar i{background:var(--bad)} .item.cancelled .bar i{background:var(--muted)}
+.item .e{color:var(--bad);font-size:13px;white-space:pre-wrap;margin-top:6px}
+.item.done .e{color:var(--warn)}
+.badge{font-size:11.5px;padding:1px 8px;border-radius:999px;background:var(--chip);color:var(--muted)}
+.badge.ok{background:var(--accent-soft);color:var(--accent)}
+.empty{color:var(--muted);font-size:14px}
+.hidden{display:none!important}
+.section-h{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.section-h h3{margin:0;font-size:17px}
+.toggle{display:flex;gap:8px;align-items:center}
+.settings .opt{margin-bottom:6px}
+.help{color:var(--muted);font-size:13px;margin-top:4px}
+footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
+@media (max-width:640px){.media{flex-direction:column}.thumb{width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1 class="brand"><img src="/logo.png" alt="" width="44" height="44"><span dir="ltr">MO <b>Downloader</b></span></h1>
+      <p class="sub">نزّل أي فيديو أو ملف صوتي بالجودة التي تختارها، أو قوائم كاملة، أو تابع قنواتك تلقائياً.</p>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
+
+  <nav id="nav">
+    <button data-p="dl">تنزيل</button>
+    <button data-p="batch">عدة روابط</button>
+    <button data-p="subs">متابعة القنوات <span class="n" id="n-subs">0</span></button>
+    <button data-p="hist">السجل <span class="n" id="n-hist">0</span></button>
+    <button data-p="settings">الإعدادات</button>
+  </nav>
+
+  <!-- ============ single link ============ -->
+  <div class="panel" id="p-dl">
+    <section class="card">
+      <div class="row">
+        <input type="text" id="url" class="grow" placeholder="https://..." autocomplete="off" spellcheck="false">
+        <button class="ghost" id="paste">لصق</button>
+        <button class="primary" id="analyze">عرض الجودات</button>
+      </div>
+      <div class="checks" style="margin-top:10px;color:var(--muted);font-size:13.5px">
+        <label><input type="checkbox" id="playlist"> إذا كان الرابط قائمة تشغيل: اعرض القائمة كاملة</label>
+      </div>
+      <div id="msg" class="msg hidden"></div>
+    </section>
+
+    <section class="card hidden" id="result">
+      <div class="media">
+        <img class="thumb" id="thumb" alt="" referrerpolicy="no-referrer">
+        <div class="meta grow">
+          <h2 id="title"></h2>
+          <div class="metarow" id="metarow"></div>
+          <div class="quick">
+            <button class="small" data-preset="best">⚡ أفضل جودة فيديو</button>
+            <button class="small" data-preset="1080">1080p</button>
+            <button class="small" data-preset="720">720p</button>
+            <button class="small" data-preset="audio">🎵 أفضل صوت MP3</button>
+          </div>
+        </div>
+      </div>
+      <div id="prev" class="msg warn hidden"></div>
+
+      <div class="tabs" id="tabs">
+        <button class="tab" data-k="av">فيديو بصوت <span class="n" id="n-av">0</span></button>
+        <button class="tab" data-k="video">فيديو عالي الجودة <span class="n" id="n-video">0</span></button>
+        <button class="tab" data-k="audio">صوت فقط <span class="n" id="n-audio">0</span></button>
+      </div>
+      <div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+      <p class="sub" id="tabhint" style="margin-top:8px"></p>
+
+      <div class="clip" id="clipbox">
+        <label class="toggle"><input type="checkbox" id="clipOn"> <b>قص جزء فقط</b> <span class="sub">— نزّل دقائق محددة بدل الفيديو كاملاً</span></label>
+        <div class="row hidden" id="clipFields" style="margin-top:10px">
+          <span>من</span><input type="text" id="clipStart" placeholder="0:00" dir="ltr">
+          <span>إلى</span><input type="text" id="clipEnd" dir="ltr">
+          <label class="toggle" style="margin-inline-start:10px"><input type="checkbox" id="clipPrecise"> قص دقيق بالثانية (أبطأ)</label>
+          <div class="help" style="width:100%">اكتب الوقت مثل 1:30 أو 1:02:45. اترك «إلى» فارغاً للتنزيل حتى النهاية. بدون القص الدقيق قد يبدأ المقطع قبل الوقت المحدد بثوانٍ قليلة.</div>
+        </div>
+      </div>
+
+      <div class="opts">
+        <div class="opt" id="o-container"><label>صيغة ملف الفيديو</label>
+          <select id="container">
+            <option value="mp4">MP4 (الأكثر توافقاً)</option>
+            <option value="mkv">MKV (يقبل كل الترميزات)</option>
+            <option value="original">كما هي من الموقع</option>
+          </select></div>
+        <div class="opt" id="o-audio"><label>تحويل الصوت إلى</label>
+          <select id="audio_convert">
+            <option value="original">بدون تحويل (الأصل)</option>
+            <option value="mp3">MP3</option><option value="m4a">M4A / AAC</option>
+            <option value="opus">Opus</option><option value="flac">FLAC (بدون فقد)</option><option value="wav">WAV</option>
+          </select></div>
+        <div class="opt" id="o-aq"><label>جودة الصوت بعد التحويل</label>
+          <select id="audio_quality">
+            <option value="0">الأعلى</option><option value="320">320 kbps</option><option value="256">256 kbps</option>
+            <option value="192">192 kbps</option><option value="128">128 kbps</option>
+          </select></div>
+        <div class="opt"><label>مجلد الحفظ</label><input type="text" id="outdir" class="ltr"></div>
+      </div>
+      <div class="checks">
+        <label id="c-subs"><input type="checkbox" id="subs"> تنزيل الترجمات (عربي/إنجليزي) وتضمينها</label>
+        <label><input type="checkbox" id="meta" checked> تضمين الصورة المصغّرة والبيانات</label>
+      </div>
+      <div class="go">
+        <div class="pick" id="pick">اختر جودة من الجدول</div>
+        <button class="primary" id="download" disabled>تنزيل</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="plresult">
+      <h2 id="pltitle"></h2>
+      <div class="metarow" id="plmeta"></div>
+      <div class="opts">
+        <div class="opt"><label>الجودة لكل العناصر</label>
+          <select id="plpreset" class="presetSel"></select></div>
+        <div class="opt"><label>صيغة الفيديو</label>
+          <select id="plcontainer"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="original">كما هي</option></select></div>
+        <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label>
+          <select id="plaudio" class="audioSel"></select></div>
+        <div class="opt"><label>مجلد الحفظ</label><input type="text" id="ploutdir" class="ltr"></div>
+      </div>
+      <div class="checks"><label><input type="checkbox" id="plskip" checked> تخطّي ما نزّلته سابقاً</label></div>
+      <div class="plist" id="plist"></div>
+      <div class="go"><div class="pick" id="plcount"></div>
+        <button class="primary" id="pldownload">تنزيل القائمة</button></div>
+    </section>
+  </div>
+
+  <!-- ============ batch ============ -->
+  <div class="panel hidden" id="p-batch">
+    <section class="card">
+      <h2>عدة روابط دفعة واحدة</h2>
+      <p class="sub">الصق الروابط (كل رابط في سطر، أو أي نص يحتوي روابط)، فتُضاف كلها إلى طابور التنزيل وتنزل تباعاً.</p>
+      <textarea id="burls" placeholder="https://www.youtube.com/watch?v=...&#10;https://vimeo.com/...&#10;..."></textarea>
+      <div class="opts">
+        <div class="opt"><label>الجودة</label><select id="bpreset" class="presetSel"></select></div>
+        <div class="opt"><label>صيغة الفيديو</label>
+          <select id="bcontainer"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="original">كما هي</option></select></div>
+        <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label><select id="baudio" class="audioSel"></select></div>
+        <div class="opt"><label>مجلد الحفظ</label><input type="text" id="boutdir" class="ltr"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="bskip" checked> تخطّي ما نزّلته سابقاً</label>
+        <label><input type="checkbox" id="bplaylist"> روابط القوائم: نزّل القائمة كاملة</label>
+        <label><input type="checkbox" id="bsubs"> تنزيل الترجمات وتضمينها</label>
+      </div>
+      <div class="go"><div class="pick" id="bcount">لا روابط بعد</div>
+        <button class="primary" id="bgo" disabled>إضافة إلى الطابور</button></div>
+      <div id="bmsg" class="msg hidden"></div>
+    </section>
+  </div>
+
+  <!-- ============ subscriptions ============ -->
+  <div class="panel hidden" id="p-subs">
+    <section class="card">
+      <h2>متابعة قناة أو قائمة</h2>
+      <p class="sub">ضع رابط قناة يوتيوب (مثل youtube.com/@name) أو قائمة تشغيل، وستنزّل الأداة كل فيديو جديد فيها تلقائياً.</p>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="surl" class="grow ltr" placeholder="https://www.youtube.com/@channel" spellcheck="false">
+      </div>
+      <div class="opts">
+        <div class="opt"><label>ابدأ من</label>
+          <select id="sstart">
+            <option value="new">الفيديوهات الجديدة فقط من الآن</option>
+            <option value="3">آخر 3 فيديوهات + الجديد</option>
+            <option value="10">آخر 10 فيديوهات + الجديد</option>
+            <option value="30">آخر 30 فيديو + الجديد</option>
+          </select></div>
+        <div class="opt"><label>الجودة</label><select id="spreset" class="presetSel"></select></div>
+        <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label><select id="saudio" class="audioSel"></select></div>
+        <div class="opt"><label>مجلد الحفظ (يُنشأ داخله مجلد باسم القناة)</label><input type="text" id="soutdir" class="ltr"></div>
+      </div>
+      <div class="go"><div class="pick" id="shint"></div>
+        <button class="primary" id="sadd">متابعة</button></div>
+      <div id="smsg" class="msg hidden"></div>
+    </section>
+    <section class="card">
+      <div class="section-h"><h3>القنوات المتابَعة</h3>
+        <button class="small" id="scheckall">فحص الكل الآن</button></div>
+      <div class="list" id="slist"><p class="empty">لا توجد متابعات بعد.</p></div>
+      <div class="msg info" id="sinfo"></div>
+    </section>
+  </div>
+
+  <!-- ============ history ============ -->
+  <div class="panel hidden" id="p-hist">
+    <section class="card">
+      <div class="section-h"><h3>سجل التنزيلات</h3>
+        <button class="small danger" id="hclear">مسح السجل كله</button></div>
+      <input type="text" id="hq" placeholder="ابحث بالعنوان أو القناة أو الموقع…" style="width:100%">
+      <p class="sub" id="hcount" style="margin-top:6px"></p>
+      <div class="list" id="hlist"></div>
+      <p class="help">السجل يمنع تكرار التنزيل في القوائم والدفعات والمتابعات. لإعادة تنزيل عنصر بتلك الطرق احذفه من السجل أولاً، أما التنزيل العادي من تبويب «تنزيل» فيعمل دائماً.</p>
+    </section>
+  </div>
+
+  <!-- ============ settings ============ -->
+  <div class="panel hidden" id="p-settings">
+    <section class="card settings">
+      <h2>الإعدادات</h2>
+      <div class="opts">
+        <div class="opt"><label>مجلد الحفظ الافتراضي</label><input type="text" id="setOutdir" class="ltr"></div>
+        <div class="opt"><label>عدد التنزيلات في نفس الوقت</label>
+          <select id="setParallel"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></div>
+        <div class="opt"><label>فحص القنوات المتابَعة كل</label>
+          <select id="setHours"><option value="1">ساعة</option><option value="3">3 ساعات</option><option value="6">6 ساعات</option>
+            <option value="12">12 ساعة</option><option value="24">يوم</option></select></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="setAuto"> تشغيل الأداة تلقائياً مع بدء الجهاز (في الخلفية، لتعمل المتابعة دائماً)</label>
+      </div>
+      <div class="go"><span class="pick" id="setmsg"></span><button class="primary" id="setSave">حفظ</button></div>
+    </section>
+
+    <section class="card">
+      <h2>الكوكيز (للمواقع التي تطلب تسجيل دخول)</h2>
+      <div class="row" style="margin-top:8px">
+        <select id="cookies">
+          <option value="">بدون</option>
+          <option value="file">ملف cookies.txt (الأضمن)</option>
+          <option value="firefox">Firefox</option><option value="chrome">Chrome</option><option value="edge">Edge</option>
+          <option value="brave">Brave</option><option value="opera">Opera</option><option value="safari">Safari</option>
+        </select>
+        <span id="cookiebox" class="row hidden">
+          <button class="small" id="cookiepick">تحميل ملف الكوكيز</button>
+          <button class="small ghost hidden" id="cookiedel">حذف</button>
+          <span id="cookiestate"></span>
+          <input type="file" id="cookiefile" accept=".txt,text/plain" class="hidden">
+        </span>
+      </div>
+      <div id="cookiehelp" class="msg info">لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.</div>
+      <div id="cmsg" class="msg hidden"></div>
+    </section>
+
+    <section class="card">
+      <h2>عن الأداة</h2>
+      <div class="sub" id="about"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="small" id="openData">فتح مجلد الحفظ</button>
+        <button class="small danger" id="quit">إيقاف الأداة</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ jobs ============ -->
+  <section class="card" style="margin-top:16px">
+    <div class="section-h"><h3>التنزيلات <span class="badge" id="jsum"></span></h3>
+      <span class="row">
+        <button class="small ghost" id="openfolder">فتح مجلد التنزيلات</button>
+        <button class="small ghost" id="cancelall">إلغاء الكل</button>
+        <button class="small ghost" id="clear">مسح المنتهي</button>
+      </span>
+    </div>
+    <div class="list" id="jobs"><p class="empty">لا توجد تنزيلات بعد.</p></div>
+  </section>
+
+  <footer>MO Downloader · يعمل محلياً على جهازك فقط، ولا يتجاوز المحتوى المحمي بتقنيات منع النسخ.</footer>
+</div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+const S = { info: null, tab: "av", sel: null, url: "", settings: {}, status: {}, hasCookie: false, doneSig: "" };
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null) continue;
+    if (k === "class") e.className = v; else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null && k !== false) e.append(k);
+  return e;
+}
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+const fmtSize = (b, approx) => {
+  if (!b) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return (approx ? "≈ " : "") + b.toFixed(b < 10 && i > 1 ? 2 : i > 1 ? 1 : 0) + " " + u[i];
+};
+const fmtDur = (s) => {
+  if (s == null || isNaN(s)) return "";
+  s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0");
+};
+const DF = new Intl.DateTimeFormat("ar-u-nu-latn-ca-gregory", { dateStyle: "medium", timeStyle: "short" });
+const RF = new Intl.RelativeTimeFormat("ar-u-nu-latn", { numeric: "auto" });
+const fmtDate = (t) => t ? DF.format(new Date(t * 1000)) : "—";
+function fmtAgo(t) {
+  if (!t) return "لم يُفحص بعد";
+  const d = (Date.now() / 1000 - t);
+  if (d < 60) return "الآن";
+  if (d < 3600) return RF.format(-Math.round(d / 60), "minute");
+  if (d < 86400) return RF.format(-Math.round(d / 3600), "hour");
+  return RF.format(-Math.round(d / 86400), "day");
+}
+const fmtRate = (k) => k ? Math.round(k) + " kbps" : "—";
+const codec = (c) => {
+  if (!c || c === "none") return "";
+  const p = c.split(".")[0].toLowerCase();
+  return ({avc1:"H.264",avc3:"H.264",h264:"H.264",hev1:"H.265",hvc1:"H.265",h265:"H.265",vp09:"VP9",vp9:"VP9",vp8:"VP8",
+    av01:"AV1",mp4a:"AAC",aac:"AAC",opus:"Opus",vorbis:"Vorbis",mp3:"MP3",flac:"FLAC",ac3:"AC3","ec-3":"E-AC3"})[p] || p;
+};
+function parseT(s) {
+  s = (s || "").trim(); if (!s) return null;
+  const p = s.split(":"); if (p.length > 3 || p.some(x => !/^\d+(\.\d+)?$/.test(x))) return NaN;
+  return p.reduce((a, x) => a * 60 + parseFloat(x), 0);
+}
+function showMsg(box, text, kind = "err") {
+  const m = $(box);
+  if (!text) { m.classList.add("hidden"); return; }
+  m.className = "msg " + (kind === "loading" ? "info" : kind); m.textContent = "";
+  if (kind === "loading") m.append(el("span", {class: "spinner"}), " " + text); else m.textContent = text;
+}
+function armed(btn, fn) {  // two-click confirmation without browser dialogs
+  btn.onclick = () => {
+    if (btn.classList.contains("armed")) { btn.classList.remove("armed"); btn.textContent = btn.dataset.t; fn(); return; }
+    btn.dataset.t = btn.textContent; btn.textContent = "اضغط مرة أخرى للتأكيد"; btn.classList.add("armed");
+    setTimeout(() => { if (btn.classList.contains("armed")) { btn.classList.remove("armed"); btn.textContent = btn.dataset.t; } }, 3500);
+  };
+}
+
+// ---------- shared select options
+const PRESETS = [["best","أفضل جودة متاحة"],["2160","حتى 4K"],["1440","حتى 1440p"],["1080","حتى 1080p"],
+                 ["720","حتى 720p"],["480","حتى 480p"],["360","حتى 360p"],["audio","صوت فقط"]];
+const AUDIOS = [["mp3","MP3"],["m4a","M4A"],["opus","Opus"],["flac","FLAC"],["wav","WAV"]];
+document.querySelectorAll(".presetSel").forEach(s => PRESETS.forEach(([v, t]) => s.append(el("option", {value: v, text: t}))));
+document.querySelectorAll(".audioSel").forEach(s => AUDIOS.forEach(([v, t]) => s.append(el("option", {value: v, text: t}))));
+
+// ---------- navigation
+function showPanel(p) {
+  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b.dataset.p === p));
+  document.querySelectorAll(".panel").forEach(x => x.classList.toggle("hidden", x.id !== "p-" + p));
+  store.set("md_panel", p);
+  if (p === "hist") loadHistory();
+  if (p === "subs") loadSubs();
+}
+document.querySelectorAll("#nav button").forEach(b => b.onclick = () => showPanel(b.dataset.p));
+
+// ---------- status & settings
+async function loadStatus() {
+  try {
+    const s = await api("/api/status"); S.status = s; S.settings = s.settings; S.hasCookie = s.cookie_file;
+    const box = $("status"); box.textContent = "";
+    box.append(el("span", {class: "pill ok", text: "yt-dlp " + s.ytdlp}));
+    if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
+    box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
+    box.append(el("span", {class: "pill " + (s.js.length ? "ok" : "bad"), text: s.js.length ? "JS ✓" : "Deno غير موجود (يوتيوب محدود)"}));
+    if (s.settings.cookies) box.append(el("span", {class: "pill", text: "كوكيز: " + (s.settings.cookies === "file" ? "ملف" : s.settings.cookies)}));
+    for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) if (!$(id).value) $(id).value = s.settings.outdir;
+    $("setOutdir").value = s.settings.outdir; $("setParallel").value = String(s.settings.max_parallel);
+    $("setHours").value = String(+s.settings.check_hours); $("setAuto").checked = !!s.settings.autostart;
+    $("cookies").value = s.settings.cookies || ""; cookieUI();
+    const ab = $("about"); ab.textContent = "";
+    ab.append("الإصدار " + s.app + " · محرك التنزيل ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
+      s.frozen ? " (يُحدَّث تلقائياً يومياً)" : " (يُحدَّث عند كل تشغيل)", el("br"), "مجلد الحفظ: ",
+      el("span", {class: "ltr", text: s.settings.outdir}));
+  } catch (e) {}
+}
+$("setSave").onclick = async () => {
+  try {
+    await api("/api/settings", { outdir: $("setOutdir").value, max_parallel: +$("setParallel").value,
+      check_hours: +$("setHours").value, autostart: $("setAuto").checked });
+    for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) $(id).value = $("setOutdir").value;
+    $("setmsg").textContent = "✓ تم الحفظ"; setTimeout(() => $("setmsg").textContent = "", 2500);
+    loadStatus();
+  } catch (e) { $("setmsg").textContent = e.message; }
+};
+
+// ---------- cookies
+function cookieUI() {
+  const isFile = $("cookies").value === "file";
+  $("cookiebox").classList.toggle("hidden", !isFile);
+  $("cookiehelp").classList.toggle("hidden", isFile && S.hasCookie);
+  $("cookiedel").classList.toggle("hidden", !S.hasCookie);
+  $("cookiestate").textContent = S.hasCookie ? "✓ ملف الكوكيز محفوظ" : "لا يوجد ملف بعد";
+}
+$("cookies").onchange = async () => { cookieUI(); await api("/api/settings", { cookies: $("cookies").value }); loadStatus(); };
+$("cookiepick").onclick = () => $("cookiefile").click();
+$("cookiefile").onchange = async () => {
+  const f = $("cookiefile").files[0]; if (!f) return;
+  try { const r = await api("/api/cookies", { text: await f.text() }); S.hasCookie = true; cookieUI();
+        showMsg("cmsg", "تم حفظ ملف الكوكيز (" + r.count + " عنصر).", "ok"); }
+  catch (e) { showMsg("cmsg", e.message); }
+  $("cookiefile").value = "";
+};
+$("cookiedel").onclick = async () => { await api("/api/cookies", { delete: true }); S.hasCookie = false; cookieUI(); loadStatus(); };
+
+// ---------- single link
+async function analyze() {
+  const url = $("url").value.trim();
+  if (!url) { showMsg("msg", "الصق رابطاً أولاً."); return; }
+  S.url = url; $("analyze").disabled = true;
+  $("result").classList.add("hidden"); $("plresult").classList.add("hidden");
+  showMsg("msg", "جارٍ قراءة الصفحة واستخراج كل الجودات…", "loading");
+  try {
+    const info = await api("/api/info", { url, playlist: $("playlist").checked });
+    S.info = info; showMsg("msg", "");
+    if (info.type === "playlist") renderPlaylist(info); else renderVideo(info);
+  } catch (e) { showMsg("msg", e.message); }
+  finally { $("analyze").disabled = false; }
+}
+function renderVideo(info) {
+  $("result").classList.remove("hidden");
+  const th = $("thumb");
+  if (info.thumbnail) { th.src = info.thumbnail; th.classList.remove("hidden"); } else th.classList.add("hidden");
+  th.onerror = () => th.classList.add("hidden");
+  $("title").textContent = info.title;
+  const row = $("metarow"); row.textContent = "";
+  if (info.uploader) row.append(el("span", {text: "👤 " + info.uploader}));
+  if (info.duration) row.append(el("span", {text: "⏱ " + fmtDur(info.duration)}));
+  if (info.site) row.append(el("span", {text: "🌐 " + info.site}));
+  if (info.is_live) row.append(el("span", {text: "🔴 بث مباشر"}));
+  const pv = $("prev");
+  if (info.previous) {
+    pv.textContent = ""; pv.classList.remove("hidden");
+    pv.append("سبق أن نزّلت هذا الفيديو في " + fmtDate(info.previous.date) + " بجودة " + (info.previous.quality || "—") + ". يمكنك تنزيله مجدداً. ");
+    if (info.previous.file) pv.append(el("button", {class: "small", text: "إظهار الملف السابق",
+      onclick: () => api("/api/open", { path: info.previous.file, select: true })}));
+  } else pv.classList.add("hidden");
+  for (const k of ["av", "video", "audio"]) $("n-" + k).textContent = info.formats[k].length;
+  $("subs").disabled = !info.subtitles.length;
+  $("c-subs").title = info.subtitles.length ? "متاح: " + info.subtitles.join("، ") : "لا توجد ترجمات لهذا الفيديو";
+  $("clipbox").classList.toggle("hidden", !!info.is_live || !S.status.ffmpeg);
+  $("clipOn").checked = false; $("clipFields").classList.add("hidden");
+  $("clipStart").value = ""; $("clipEnd").value = ""; $("clipEnd").placeholder = info.duration ? fmtDur(info.duration) : "النهاية";
+  const bestV = info.formats.video[0], bestAV = info.formats.av[0];
+  let tab = ["video", "av", "audio"].find(k => info.formats[k].length) || "av";
+  if (bestAV && (!bestV || (bestAV.height || 0) >= (bestV.height || 0))) tab = "av";
+  setTab(tab, true);
+}
+function setTab(k, autoSelect) {
+  S.tab = k;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.k === k));
+  const rows = S.info.formats[k], head = $("thead"), body = $("tbody");
+  head.textContent = ""; body.textContent = "";
+  const cols = k === "audio" ? ["", "الجودة", "الصيغة", "الترميز", "التردد", "الحجم", "ملاحظة", "المعرّف"]
+    : ["", "الدقة", "الصيغة", "إطار/ث", "ترميز الفيديو", k === "av" ? "ترميز الصوت" : "معدل البت", "الحجم", "ملاحظة", "المعرّف"];
+  head.append(el("tr", {}, ...cols.map(c => el("th", {text: c}))));
+  $("tabhint").textContent = {
+    av: "ملف واحد يحتوي الصورة والصوت معاً كما يوفّره الموقع.",
+    video: "صورة فقط بأعلى الدقّات (4K/1080p…)؛ ستُدمج تلقائياً مع أفضل صوت متاح.",
+    audio: "مسار صوتي فقط؛ يمكنك تحويله إلى MP3 أو غيره من الخيارات بالأسفل.",
+  }[k];
+  $("o-container").classList.toggle("hidden", k === "audio");
+  $("o-audio").classList.toggle("hidden", k !== "audio");
+  $("o-aq").classList.toggle("hidden", k !== "audio");
+  $("c-subs").classList.toggle("hidden", k === "audio");
+  if (!rows.length) body.append(el("tr", {}, el("td", {colspan: cols.length, class: "empty", text: "لا توجد صيغ من هذا النوع."})));
+  rows.forEach((f, i) => {
+    const radio = el("input", {type: "radio", name: "fmt"});
+    let cells;
+    if (k === "audio") {
+      cells = [el("td", {}, radio),
+        el("td", {class: "q", text: f.abr ? fmtRate(f.abr) : (f.tbr ? fmtRate(f.tbr) : (f.note || "صوت"))}),
+        el("td", {text: f.ext}), el("td", {text: codec(f.acodec) || "—"}),
+        el("td", {text: f.asr ? (f.asr / 1000).toFixed(1) + " kHz" : "—"}),
+        el("td", {class: "ltr", text: fmtSize(f.size, f.approx)}),
+        el("td", {text: [f.note, f.lang].filter(Boolean).join(" · ")}), el("td", {class: "ltr", text: f.id})];
+    } else {
+      const q = el("td", {class: "q", text: f.height ? f.height + "p" : (f.note || f.id)});
+      if (f.height >= 2160) q.append(el("span", {class: "tag", text: "4K"}));
+      if (f.hdr) q.append(el("span", {class: "tag", text: "HDR"}));
+      cells = [el("td", {}, radio), q, el("td", {text: f.ext}), el("td", {text: f.fps ? Math.round(f.fps) : "—"}),
+        el("td", {text: codec(f.vcodec) || "—"}), el("td", {text: k === "av" ? (codec(f.acodec) || "—") : fmtRate(f.vbr || f.tbr)}),
+        el("td", {class: "ltr", text: fmtSize(f.size, f.approx)}), el("td", {text: f.note}), el("td", {class: "ltr", text: f.id})];
+    }
+    const tr = el("tr", {}, ...cells);
+    tr.onclick = () => select(f, tr, radio);
+    body.append(tr);
+    if (autoSelect && i === 0) select(f, tr, radio);
+  });
+  if (!autoSelect) { S.sel = null; updatePick(); }
+}
+function select(f, tr, radio) {
+  document.querySelectorAll("#tbody tr").forEach(r => r.classList.remove("sel"));
+  tr.classList.add("sel"); radio.checked = true; S.sel = { ...f, tabKind: S.tab }; updatePick();
+}
+function clipRange() {
+  if (!$("clipOn").checked) return null;
+  const a = parseT($("clipStart").value), b = parseT($("clipEnd").value);
+  return { a, b, startTxt: $("clipStart").value.trim(), endTxt: $("clipEnd").value.trim() };
+}
+function updatePick() {
+  const f = S.sel; $("download").disabled = !f;
+  if (!f) { $("pick").textContent = "اختر جودة من الجدول"; return; }
+  let size = f.size, approx = f.approx, extra = "";
+  const c = clipRange(), dur = S.info && S.info.duration;
+  if (c) {
+    if (isNaN(c.a) || isNaN(c.b)) extra = " — صيغة الوقت غير صحيحة";
+    else if (c.b != null && c.b <= (c.a || 0)) extra = " — النهاية قبل البداية";
+    else if (dur && size) { const len = (c.b ?? dur) - (c.a || 0); size = size * Math.max(0, len) / dur; approx = true;
+      extra = " — مقطع " + fmtDur(c.a || 0) + " إلى " + fmtDur(c.b ?? dur); }
+  }
+  const what = f.tabKind === "audio" ? "صوت " + (f.abr ? fmtRate(f.abr) : f.ext)
+    : (f.height ? f.height + "p " : "") + f.ext + (f.tabKind === "video" ? " + أفضل صوت" : "");
+  $("pick").textContent = "المختار: " + what + " — " + fmtSize(size, approx) + extra;
+}
+["clipStart", "clipEnd"].forEach(id => $(id).addEventListener("input", updatePick));
+$("clipOn").onchange = () => { $("clipFields").classList.toggle("hidden", !$("clipOn").checked); updatePick(); };
+function singleOpts() {
+  const c = clipRange();
+  return {
+    url: S.url, subs: $("subs").checked && !$("subs").disabled, meta: $("meta").checked, outdir: $("outdir").value.trim(),
+    container: $("container").value, audio_convert: $("audio_convert").value, audio_quality: $("audio_quality").value,
+    title: S.info && S.info.title, clip_start: c ? c.startTxt : "", clip_end: c ? c.endTxt : "", clip_precise: $("clipPrecise").checked,
+  };
+}
+async function download() {
+  const f = S.sel; if (!f) return;
+  try {
+    await api("/api/download", { ...singleOpts(), mode: "format", format_id: f.id, kind: f.tabKind,
+      label: (f.tabKind === "audio" ? "صوت" : (f.height ? f.height + "p" : f.ext)) + (clipRange() ? " · مقطع" : "") });
+    poll(); flash($("download"));
+  } catch (e) { showMsg("msg", e.message); window.scrollTo({top: 0, behavior: "smooth"}); }
+}
+async function downloadPreset(p) {
+  try {
+    await api("/api/download", { ...singleOpts(), mode: "preset", preset: p,
+      audio_convert: p === "audio" ? "mp3" : $("audio_convert").value,
+      label: (p === "audio" ? "MP3" : p === "best" ? "أفضل جودة" : p + "p") + (clipRange() ? " · مقطع" : "") });
+    poll();
+  } catch (e) { showMsg("msg", e.message); window.scrollTo({top: 0, behavior: "smooth"}); }
+}
+function flash(b) { const t = b.textContent; b.textContent = "✓ أُضيف"; setTimeout(() => b.textContent = t, 1500); }
+function renderPlaylist(info) {
+  $("plresult").classList.remove("hidden");
+  $("pltitle").textContent = "📃 " + info.title;
+  $("plmeta").textContent = [info.uploader, info.site, info.count + " عنصر",
+    info.already ? info.already + " منها نُزّل سابقاً" : null].filter(Boolean).join(" · ");
+  const list = $("plist"); list.textContent = "";
+  info.entries.forEach((e, i) => list.append(el("div", {class: e.seen ? "seen" : ""},
+    el("span", {text: (i + 1) + ". " + e.title + (e.seen ? "  ✓" : "")}), el("span", {text: fmtDur(e.duration)}))));
+  $("plcount").textContent = "تُحفظ في مجلد باسم القائمة، مرقّمة بترتيبها.";
+}
+async function downloadPlaylist() {
+  const p = $("plpreset").value;
+  try {
+    await api("/api/download", {
+      url: S.url, playlist: true, mode: "preset", preset: p, skip: $("plskip").checked,
+      container: $("plcontainer").value, audio_convert: p === "audio" ? $("plaudio").value : "original",
+      audio_quality: "0", meta: true, outdir: $("ploutdir").value.trim(), title: S.info.title,
+      label: "قائمة · " + $("plpreset").selectedOptions[0].text,
+    });
+    poll(); flash($("pldownload"));
+  } catch (e) { showMsg("msg", e.message); }
+}
+
+// ---------- batch
+function batchUrls() { return [...new Set(($("burls").value.match(/https?:\/\/[^\s<>"']+/g) || []))]; }
+$("burls").addEventListener("input", () => {
+  const n = batchUrls().length;
+  $("bcount").textContent = n ? n + " رابط" : "لا روابط بعد"; $("bgo").disabled = !n;
+});
+$("bgo").onclick = async () => {
+  const p = $("bpreset").value;
+  try {
+    const r = await api("/api/batch", { urls: $("burls").value, preset: p, container: $("bcontainer").value,
+      audio_convert: p === "audio" ? $("baudio").value : "original", outdir: $("boutdir").value.trim(),
+      skip: $("bskip").checked, playlist: $("bplaylist").checked, subs: $("bsubs").checked, meta: true });
+    showMsg("bmsg", "أُضيف " + r.count + " رابط إلى الطابور. تابع التقدّم في قائمة التنزيلات بالأسفل.", "ok");
+    $("burls").value = ""; $("bcount").textContent = "لا روابط بعد"; $("bgo").disabled = true; poll();
+  } catch (e) { showMsg("bmsg", e.message); }
+};
+
+// ---------- subscriptions
+const presetName = (p) => (PRESETS.find(x => x[0] === p) || [p, p])[1];
+async function loadSubs() {
+  try {
+    const { subs, hours } = await api("/api/subs");
+    $("n-subs").textContent = subs.length;
+    $("sinfo").textContent = "تُفحص القنوات كل " + (+hours === 1 ? "ساعة" : +hours === 24 ? "يوم" : hours + " ساعات") +
+      " أثناء عمل الأداة، وتُحفظ الفيديوهات في مجلد باسم كل قناة. لتعمل المتابعة دائماً فعّل «التشغيل مع بدء الجهاز» من الإعدادات.";
+    const box = $("slist"); box.textContent = "";
+    if (!subs.length) { box.append(el("p", {class: "empty", text: "لا توجد متابعات بعد."})); return; }
+    for (const s of subs) {
+      const st = el("div", {class: "s"},
+        el("span", {class: "badge" + (s.enabled ? " ok" : ""), text: s.enabled ? "مفعّلة" : "متوقفة"}),
+        el("span", {text: presetName(s.preset) + (s.preset === "audio" ? " · " + s.audio_convert.toUpperCase() : "")}),
+        el("span", {text: "آخر فحص: " + fmtAgo(s.last_check)}),
+        s.last_result ? el("span", {text: s.last_result}) : null,
+        s.total ? el("span", {text: "المجموع: " + s.total}) : null);
+      const acts = el("div", {class: "acts"},
+        el("button", {class: "small", text: "فحص الآن", onclick: async () => { await api("/api/subs/check", {id: s.id}); poll(); loadSubs(); }}),
+        el("button", {class: "small", text: s.enabled ? "إيقاف مؤقت" : "تفعيل",
+          onclick: async () => { await api("/api/subs/update", {id: s.id, enabled: !s.enabled}); loadSubs(); }}),
+        el("button", {class: "small ghost", text: "فتح المجلد", onclick: () => api("/api/open", {path: s.outdir})}),
+        el("button", {class: "small ghost", text: "فتح الرابط", onclick: () => api("/api/open_url", {url: s.url})}));
+      const del = el("button", {class: "small danger", text: "إلغاء المتابعة"});
+      armed(del, async () => { await api("/api/subs/delete", {id: s.id}); loadSubs(); });
+      acts.append(del);
+      box.append(el("div", {class: "item" + (s.enabled ? "" : " off")},
+        el("div", {class: "body"}, el("div", {class: "t", text: "📺 " + s.title}),
+          el("div", {class: "s"}, el("span", {class: "ltr", text: s.url})), st, acts)));
+    }
+  } catch (e) {}
+}
+$("sadd").onclick = async () => {
+  const url = $("surl").value.trim(); if (!url) { showMsg("smsg", "ضع رابط القناة أو القائمة."); return; }
+  const p = $("spreset").value;
+  $("sadd").disabled = true; showMsg("smsg", "جارٍ قراءة القناة…", "loading");
+  try {
+    const r = await api("/api/subs/add", { url, start: $("sstart").value, preset: p,
+      audio_convert: $("saudio").value, container: "mp4", outdir: $("soutdir").value.trim() });
+    showMsg("smsg", "✓ تمت متابعة «" + r.sub.title + "»." + ($("sstart").value === "new" ? " سيُنزَّل كل فيديو جديد تلقائياً." : " بدأ تنزيل آخر الفيديوهات."), "ok");
+    $("surl").value = ""; loadSubs(); poll();
+  } catch (e) { showMsg("smsg", e.message); }
+  finally { $("sadd").disabled = false; }
+};
+$("scheckall").onclick = async () => { await api("/api/subs/check", {all: true}); poll(); loadSubs(); };
+
+// ---------- history
+let hTimer = null;
+$("hq").addEventListener("input", () => { clearTimeout(hTimer); hTimer = setTimeout(loadHistory, 250); });
+async function loadHistory() {
+  try {
+    const r = await api("/api/history?limit=300&q=" + encodeURIComponent($("hq").value));
+    $("n-hist").textContent = r.total;
+    $("hcount").textContent = r.total ? (r.count === r.total ? r.total + " تنزيل" : r.count + " من " + r.total) +
+      (r.count > r.items.length ? " (يُعرض أحدث " + r.items.length + ")" : "") : "";
+    const box = $("hlist"); box.textContent = "";
+    if (!r.items.length) { box.append(el("p", {class: "empty", text: r.total ? "لا نتائج." : "لم تنزّل شيئاً بعد."})); return; }
+    for (const h of r.items) {
+      const del = el("button", {class: "small ghost danger", text: "حذف من السجل"});
+      armed(del, async () => { await api("/api/history/delete", {key: h.key, date: h.date}); loadHistory(); });
+      box.append(el("div", {class: "item"}, el("div", {class: "body"},
+        el("div", {class: "t", text: h.title}),
+        el("div", {class: "s"},
+          el("span", {text: fmtDate(h.date)}), el("span", {text: h.quality}),
+          h.size ? el("span", {class: "ltr", text: fmtSize(h.size)}) : null,
+          h.clip ? el("span", {text: "✂ " + h.clip}) : null,
+          h.uploader ? el("span", {text: h.uploader}) : null,
+          h.site ? el("span", {text: h.site}) : null,
+          h.source ? el("span", {class: "badge", text: h.source}) : null),
+        el("div", {class: "acts"},
+          h.file ? el("button", {class: "small", text: "إظهار الملف", onclick: () => api("/api/open", {path: h.file, select: true})}) : null,
+          h.url ? el("button", {class: "small ghost", text: "فتح الرابط", onclick: () => api("/api/open_url", {url: h.url})}) : null,
+          h.url ? el("button", {class: "small ghost", text: "تنزيل مجدداً", onclick: () => {
+            $("url").value = h.url; showPanel("dl"); analyze(); }}) : null,
+          del))));
+    }
+  } catch (e) {}
+}
+armed($("hclear"), async () => { await api("/api/history/clear", {}); loadHistory(); });
+
+// ---------- jobs
+let pollTimer = null;
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const { jobs } = await api("/api/jobs");
+    renderJobs(jobs);
+    const active = jobs.some(j => !["done", "error", "cancelled"].includes(j.status));
+    const sig = jobs.map(j => j.id + j.status + (j.done_count || 0)).join();
+    if (sig !== S.doneSig) {  // something finished -> refresh history/subs counters
+      S.doneSig = sig;
+      const panel = store.get("md_panel", "dl");
+      if (panel === "hist") loadHistory(); else api("/api/history?limit=1").then(r => $("n-hist").textContent = r.total).catch(() => {});
+      if (panel === "subs") loadSubs();
+    }
+    pollTimer = setTimeout(poll, active ? 800 : 4000);
+  } catch (e) { pollTimer = setTimeout(poll, 4000); }
+}
+function renderJobs(jobs) {
+  const box = $("jobs"); box.textContent = "";
+  const act = jobs.filter(j => ["starting", "downloading", "processing"].includes(j.status)).length;
+  const q = jobs.filter(j => j.status === "queued").length;
+  $("jsum").textContent = act || q ? (act ? act + " يعمل" : "") + (act && q ? " · " : "") + (q ? q + " في الطابور" : "") : "";
+  $("jsum").classList.toggle("hidden", !(act || q));
+  if (!jobs.length) { box.append(el("p", {class: "empty", text: "لا توجد تنزيلات بعد."})); return; }
+  for (const j of jobs) {
+    const s = el("div", {class: "s"});
+    s.append(el("span", {text: j.stage || ""}));
+    if (j.label) s.append(el("span", {class: "badge", text: j.label}));
+    if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
+    if (j.many) {
+      if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
+      if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
+      if (j.skipped) s.append(el("span", {text: "تُخطّي " + j.skipped + " (موجود سابقاً)"}));
+      if (j.failed) s.append(el("span", {text: "تعذّر " + j.failed}));
+    }
+    if (j.status === "downloading") {
+      if (j.percent != null) s.append(el("span", {text: j.percent.toFixed(1) + "%"}));
+      if (j.total) s.append(el("span", {class: "ltr", text: fmtSize(j.downloaded) + " / " + fmtSize(j.total)}));
+      if (j.speed) s.append(el("span", {class: "ltr", text: fmtSize(j.speed) + "/s"}));
+      if (j.eta != null) s.append(el("span", {text: "متبقٍّ " + fmtDur(j.eta)}));
+    }
+    const fin = ["done", "cancelled"].includes(j.status);
+    const bar = fin ? null : el("div", {class: "bar"}, el("i"));
+    if (bar) bar.firstChild.style.width = (j.percent || 0) + "%";
+    const acts = el("div", {class: "acts"});
+    if (!["done", "error", "cancelled"].includes(j.status))
+      acts.append(el("button", {class: "small", text: "إلغاء", onclick: () => api("/api/cancel", {id: j.id}).then(poll)}));
+    if (j.status === "done" && (j.file || j.outdir))
+      acts.append(el("button", {class: "small", text: j.file && !j.many ? "إظهار الملف" : "فتح المجلد",
+        onclick: () => api("/api/open", {path: j.many ? j.outdir : (j.file || j.outdir), select: !!j.file && !j.many})}));
+    if (j.status === "error" || j.status === "cancelled")
+      acts.append(el("button", {class: "small", text: "إعادة المحاولة", onclick: () => api("/api/retry", {id: j.id}).then(poll)}));
+    const title = j.many && j.current && j.status !== "done" ? j.title + " — " + j.current : j.title;
+    box.append(el("div", {class: "item " + j.status}, el("div", {class: "body"},
+      el("div", {class: "t", text: title}), s, bar, j.error ? el("div", {class: "e", dir: "auto", text: j.error}) : null, acts)));
+  }
+}
+
+// ---------- wire up
+$("analyze").onclick = analyze;
+$("url").addEventListener("keydown", e => { if (e.key === "Enter") analyze(); });
+$("url").addEventListener("paste", () => setTimeout(() => { if ($("url").value.trim()) analyze(); }, 50));
+$("paste").onclick = async () => {
+  try { $("url").value = (await navigator.clipboard.readText()).trim(); analyze(); }
+  catch (e) { $("url").focus(); showMsg("msg", "اضغط Ctrl+V داخل خانة الرابط.", "info"); }
+};
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => setTab(t.dataset.k, true));
+document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => downloadPreset(b.dataset.preset));
+$("download").onclick = download;
+$("pldownload").onclick = downloadPlaylist;
+$("clear").onclick = () => api("/api/clear", {}).then(poll);
+$("cancelall").onclick = () => api("/api/cancel_all", {}).then(poll);
+$("openfolder").onclick = () => api("/api/open", { path: S.settings.outdir });
+$("openData").onclick = () => api("/api/open", { path: S.settings.outdir });
+$("quit").onclick = async () => {
+  try { await api("/api/shutdown", {}); } catch (e) {}
+  clearTimeout(pollTimer);
+  document.querySelector(".wrap").innerHTML = '<div class="card" style="margin-top:40px;text-align:center"><h2 style="margin:0 0 6px">تم إيقاف MO Downloader</h2><p class="sub">يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.</p></div>';
+};
+loadStatus().then(() => { showPanel(store.get("md_panel", "dl")); loadSubs(); });
+poll();
+$("url").focus();
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    main()

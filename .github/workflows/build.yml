@@ -1,0 +1,54 @@
+# Builds MO Downloader for Windows and macOS on GitHub (free for public and private repos within limits).
+# Run it from the "Actions" tab -> "Build MO Downloader" -> "Run workflow",
+# or push a tag like v2.0 to also publish a Release with the files attached.
+name: Build MO Downloader
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest   # Windows 10/11 x64 -> installer
+          - os: macos-latest     # Apple Silicon Macs (M1/M2/M3/M4)
+          - os: macos-15-intel   # Intel Macs
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+      - name: Build
+        run: python build-kit/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MO-Downloader-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*

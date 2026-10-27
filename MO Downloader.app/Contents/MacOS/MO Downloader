@@ -1,0 +1,41 @@
+#!/bin/bash
+# MO Downloader for macOS: starts the local server and opens it in the browser.
+export PATH="/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
+LOG="$HOME/Library/Logs/MO Downloader.log"
+mkdir -p "$HOME/Library/Logs"
+
+PY=""
+for c in python3.13 python3.12 python3.11 python3.10 python3; do
+  p="$(command -v $c 2>/dev/null)" || continue
+  # skip Apple's stub that only offers to install developer tools
+  if [ "$p" = "/usr/bin/python3" ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+  PY="$p"; break
+done
+if [ -z "$PY" ]; then
+  osascript -e 'display dialog "MO Downloader needs Python 3.\n\nDownload and install it from python.org, then open MO Downloader again." buttons {"Open python.org","Cancel"} default button 1 with title "MO Downloader" with icon caution' \
+    -e 'if button returned of result is "Open python.org" then open location "https://www.python.org/downloads/macos/"' >/dev/null 2>&1
+  exit 1
+fi
+
+# already open? just show it
+if curl -s -m 2 http://127.0.0.1:8765/api/ping | grep -q "MO Downloader"; then
+  case " $* " in *" --background "*) ;; *) open "http://127.0.0.1:8765/";; esac
+  exit 0
+fi
+
+case " $* " in *" --background "*) ;; *) osascript -e 'display notification "Starting… (the first launch can take a minute)" with title "MO Downloader"' >/dev/null 2>&1;; esac
+{
+  echo "=== $(date) — $PY"
+  "$PY" -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default]" imageio-ffmpeg deno 2>/dev/null \
+   || "$PY" -m pip install -U --quiet --user "yt-dlp[default]" imageio-ffmpeg deno 2>/dev/null \
+   || "$PY" -m pip install -U --quiet --break-system-packages "yt-dlp[default]" imageio-ffmpeg deno
+} >>"$LOG" 2>&1
+
+export MO_APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
+"$PY" "$HERE/mo_downloader.py" "$@" >>"$LOG" 2>&1
+code=$?
+if [ $code -ne 0 ]; then
+  osascript -e "display dialog \"MO Downloader could not start.\n\nDetails are in:\n$LOG\" buttons {\"OK\"} with title \"MO Downloader\" with icon stop" >/dev/null 2>&1
+fi
+exit $code
