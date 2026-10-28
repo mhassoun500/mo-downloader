@@ -13,11 +13,21 @@ const PRESETS = [
 ];
 
 const options = () => ext.storage.local.get(DEFAULTS);
+// Safari lacks some APIs (downloads; sometimes storage.session / webRequest). Every optional feature checks first,
+// so a missing API can never stop the rest of this script (the popup's "is the app running?" included).
+const has = (obj, ...path) => path.reduce((o, k) => (o && o[k] != null ? o[k] : null), obj) != null;
+const SESSION = has(ext, "storage", "session") ? ext.storage.session : null;
+function timeoutSignal(ms) {
+  if (globalThis.AbortSignal && AbortSignal.timeout) return AbortSignal.timeout(ms);
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
 
 // ---------------------------------------------------------------- talking to the app
 async function probe(url) {
   try {
-    const r = await fetch(url + "api/ext/status", { headers: HEADERS, signal: AbortSignal.timeout(900) });
+    const r = await fetch(url + "api/ext/status", { headers: HEADERS, signal: timeoutSignal(1500), cache: "no-store" });
     const j = await r.json();
     return j.app === "MO Downloader" ? j : null;
   } catch (e) {
@@ -104,7 +114,7 @@ async function send(job, tabId) {
 }
 
 function flashBadge(tabId) {
-  if (tabId == null || tabId < 0) return;
+  if (tabId == null || tabId < 0 || !has(ext, "action", "setBadgeText")) return;
   ext.action.setBadgeBackgroundColor({ color: "#0f6b5c", tabId }).catch(() => {});
   ext.action.setBadgeText({ text: "✓", tabId }).catch(() => {});
   setTimeout(() => updateBadge(tabId), 3500);
@@ -135,18 +145,19 @@ function withTab(tabId, fn) {
 
 async function mediaFor(tabId) {
   if (found.has(tabId)) return found.get(tabId);
-  const got = (await ext.storage.session.get(key(tabId)).catch(() => ({})))[key(tabId)] || [];
+  const got = SESSION ? ((await SESSION.get(key(tabId)).catch(() => ({})))[key(tabId)] || []) : [];
   found.set(tabId, got);
   return got;
 }
 
 async function saveMedia(tabId, list) {
   found.set(tabId, list);
-  ext.storage.session.set({ [key(tabId)]: list }).catch(() => {});
+  if (SESSION) SESSION.set({ [key(tabId)]: list }).catch(() => {});
   updateBadge(tabId);
 }
 
 async function updateBadge(tabId) {
+  if (!has(ext, "action", "setBadgeText") || tabId == null || tabId < 0) return;
   const n = (await mediaFor(tabId)).length;
   ext.action.setBadgeBackgroundColor({ color: "#9a5b00", tabId }).catch(() => {});
   ext.action.setBadgeText({ text: n ? String(n) : "", tabId }).catch(() => {});
@@ -169,6 +180,7 @@ function classify(url, headers, statusCode) {
   return null;
 }
 
+if (has(ext, "webRequest", "onHeadersReceived")) try {
 ext.webRequest.onHeadersReceived.addListener(
   (d) => {
     if (d.tabId < 0 || !/^https?:/.test(d.url) || /^https?:\/\/(127\.0\.0\.1|localhost):87\d\d\//.test(d.url)) return;
@@ -187,20 +199,23 @@ ext.webRequest.onHeadersReceived.addListener(
   { urls: ["<all_urls>"], types: MEDIA_TYPES },
   ["responseHeaders"]
 );
+} catch (e) { console.warn("MO: stream catching unavailable", e); }
 
 // a new page starts loading in the tab: forget the previous page's streams. (Done on the page request itself,
 // which always comes before the new page's own requests, so nothing caught early gets wiped.)
+if (has(ext, "webRequest", "onBeforeRequest")) try {
 ext.webRequest.onBeforeRequest.addListener(
   (d) => { if (d.tabId >= 0 && d.frameId === 0) withTab(d.tabId, () => saveMedia(d.tabId, [])); },
   { urls: ["<all_urls>"], types: ["main_frame"] }
 );
-ext.tabs.onRemoved.addListener((tabId) => {
+} catch (e) {}
+if (has(ext, "tabs", "onRemoved")) ext.tabs.onRemoved.addListener((tabId) => {
   found.delete(tabId);
-  ext.storage.session.remove(key(tabId)).catch(() => {});
+  if (SESSION) SESSION.remove(key(tabId)).catch(() => {});
 });
 
 // ---------------------------------------------------------------- hand browser downloads to the app
-ext.downloads.onCreated.addListener(async (item) => {
+if (has(ext, "downloads", "onCreated")) ext.downloads.onCreated.addListener(async (item) => {
   const { capture } = await options();
   const url = item.finalUrl || item.url;
   if (!capture || !/^https?:/.test(url || "") || item.byExtensionId === ext.runtime.id) return;
@@ -225,7 +240,8 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
       case "status": {
         const b = await findServer();
-        return { running: !!b, url: b };
+        return { running: !!b, url: b, canCapture: has(ext, "downloads", "onCreated"),
+                 canSniff: has(ext, "webRequest", "onHeadersReceived") };
       }
       case "jobs":
         return await call("api/ext/jobs");
@@ -258,7 +274,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ---------------------------------------------------------------- keyboard shortcut (Alt+Shift+S)
-ext.commands.onCommand.addListener(async (command) => {
+if (has(ext, "commands", "onCommand")) ext.commands.onCommand.addListener(async (command) => {
   if (command !== "mo-download-page") return;
   const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
   if (!tab || !/^https?:/.test(tab.url || "")) return;
@@ -272,6 +288,7 @@ ext.commands.onCommand.addListener(async (command) => {
 
 // ---------------------------------------------------------------- right-click menu
 function buildMenus() {
+  if (!has(ext, "contextMenus", "create")) return;
   const ctx = ["page", "link", "video", "audio"];
   ext.contextMenus.removeAll(() => {
     ext.contextMenus.create({ id: "mo", title: "MO Downloader", contexts: [...ctx, "image"] });
@@ -285,7 +302,7 @@ function buildMenus() {
 ext.runtime.onInstalled.addListener(buildMenus);
 ext.runtime.onStartup && ext.runtime.onStartup.addListener(buildMenus);
 
-ext.contextMenus.onClicked.addListener(async (info, tab) => {
+if (has(ext, "contextMenus", "onClicked")) ext.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = String(info.menuItemId);
   if (!id.startsWith("mo:")) return;
   const page = info.frameUrl || info.pageUrl || (tab && tab.url);

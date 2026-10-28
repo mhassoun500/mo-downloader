@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -1628,15 +1628,26 @@ def extension_source():
 
 
 def export_extension():
-    """Copy the browser extension to a normal folder the browser's 'Load unpacked' dialog can reach."""
+    """Copy the browser extension to normal folders the browsers' install dialogs can reach:
+    one for Chrome/Edge/Brave/Opera, one adjusted for Safari."""
     src = extension_source()
     if not src:
         raise ValueError("ملفات إضافة المتصفح غير موجودة في هذه النسخة.")
     dst = Path.home() / "MO Downloader Extension"
-    if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(src, dst)
-    return dst
+    safari = Path.home() / "MO Downloader Extension - Safari"
+    for d in (dst, safari):
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(src, d)
+    # Safari: a non-persistent background page instead of a service worker (Safari's service-worker
+    # background can't reach this computer's app), and no "downloads" permission (Safari has no such API).
+    mf = safari / "manifest.json"
+    m = json.loads(mf.read_text(encoding="utf-8"))
+    m["background"] = {"scripts": ["background.js"], "persistent": False}
+    m["permissions"] = [x for x in m.get("permissions", []) if x != "downloads"]
+    m.pop("browser_specific_settings", None)
+    mf.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    return dst, safari
 
 
 def ext_download(req):
@@ -1871,9 +1882,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/proxy_test":
                 return self._send(200, proxy_test(req.get("proxy")))
             if p == "/api/ext_folder":
-                dst = export_extension()
-                open_path(dst)
-                return self._send(200, {"ok": True, "path": str(dst)})
+                dst, safari = export_extension()
+                open_path(safari if req.get("safari") else dst)
+                return self._send(200, {"ok": True, "path": str(dst), "safari": str(safari)})
             if p == "/api/open_url":
                 u = str(req.get("url") or "")
                 if u.startswith(("http://", "https://")):

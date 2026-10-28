@@ -1,7 +1,7 @@
 const ext = globalThis.browser ?? chrome;
 const $ = (id) => document.getElementById(id);
 const DEFAULTS = { capture: false, videoButton: true, imageButton: true, sendCookies: true };
-let tab = null, running = false;
+let tab = null, running = false, sniffOff = false;
 
 function send(msg) {
   return new Promise((resolve) =>
@@ -25,6 +25,14 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 async function refreshStatus() {
   const s = await send({ type: "status" });
   running = !!s.running;
+  // features this browser doesn't offer (e.g. Safari has no downloads API)
+  if (s.canCapture === false) $("o-capture").closest("label").style.display = "none";
+  if (s.canSniff === false) {
+    $("media").textContent = "";
+    $("media").append(el("div", "empty", "التقاط الفيديو من الصفحة غير متاح في هذا المتصفح."));
+    $("clearMedia").style.display = "none";
+    sniffOff = true;
+  }
   $("dot").className = "dot " + (running ? "on" : "off");
   $("dotText").textContent = running ? "يعمل" : "غير مشغّل";
   $("launch").style.display = running ? "none" : "inline";
@@ -54,7 +62,7 @@ async function refreshJobs() {
 }
 
 async function refreshMedia() {
-  if (!tab) return;
+  if (!tab || sniffOff) return;
   const r = await send({ type: "media", tabId: tab.id });
   const box = $("media");
   box.textContent = "";

@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -1628,15 +1628,26 @@ def extension_source():
 
 
 def export_extension():
-    """Copy the browser extension to a normal folder the browser's 'Load unpacked' dialog can reach."""
+    """Copy the browser extension to normal folders the browsers' install dialogs can reach:
+    one for Chrome/Edge/Brave/Opera, one adjusted for Safari."""
     src = extension_source()
     if not src:
         raise ValueError("ملفات إضافة المتصفح غير موجودة في هذه النسخة.")
     dst = Path.home() / "MO Downloader Extension"
-    if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(src, dst)
-    return dst
+    safari = Path.home() / "MO Downloader Extension - Safari"
+    for d in (dst, safari):
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(src, d)
+    # Safari: a non-persistent background page instead of a service worker (Safari's service-worker
+    # background can't reach this computer's app), and no "downloads" permission (Safari has no such API).
+    mf = safari / "manifest.json"
+    m = json.loads(mf.read_text(encoding="utf-8"))
+    m["background"] = {"scripts": ["background.js"], "persistent": False}
+    m["permissions"] = [x for x in m.get("permissions", []) if x != "downloads"]
+    m.pop("browser_specific_settings", None)
+    mf.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    return dst, safari
 
 
 def ext_download(req):
@@ -1871,9 +1882,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/proxy_test":
                 return self._send(200, proxy_test(req.get("proxy")))
             if p == "/api/ext_folder":
-                dst = export_extension()
-                open_path(dst)
-                return self._send(200, {"ok": True, "path": str(dst)})
+                dst, safari = export_extension()
+                open_path(safari if req.get("safari") else dst)
+                return self._send(200, {"ok": True, "path": str(dst), "safari": str(safari)})
             if p == "/api/open_url":
                 u = str(req.get("url") or "")
                 if u.startswith(("http://", "https://")):
@@ -2406,6 +2417,16 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <span class="sub" id="extPath"></span>
       </div>
       <p class="help">لا تحذف المجلد بعد التثبيت، فالمتصفح يقرأ الإضافة منه. وعند تحديث الأداة اضغط «تجهيز مجلد الإضافة» مرة أخرى ثم زر التحديث في صفحة الإضافات.</p>
+      <details style="margin-top:10px">
+        <summary style="cursor:pointer;font-weight:600">في Safari على الماك</summary>
+        <ol class="sub" style="margin:8px 0 0;padding-inline-start:20px;line-height:2">
+          <li>اضغط <button class="small" id="extSafari">تجهيز مجلد إضافة Safari</button> فيُنشأ مجلد <span class="ltr">MO Downloader Extension - Safari</span> (نسخة معدّلة خصيصاً لسفاري).</li>
+          <li>في Safari: الإعدادات ← متقدم ← فعّل «إظهار ميزات مطوّري الويب».</li>
+          <li>من قائمة «تطوير» اختر «إعدادات المطوّر…» ثم «إضافة امتداد مؤقت…» واختر مجلد سفاري.</li>
+          <li>في الإعدادات ← الامتدادات: فعّل MO Downloader، ثم «تعديل مواقع الويب» واجعل «مواقع الويب الأخرى» على «السماح». بدون هذا لا تستطيع الإضافة الوصول إلى البرنامج.</li>
+        </ol>
+        <p class="help">سفاري يحذف الامتداد المؤقت عند إغلاقه أو بعد ٢٤ ساعة، فتكرر الخطوة ٣. وفي سفاري لا يتوفر «تمرير تنزيلات المتصفح» لأن سفاري لا يسمح للإضافات بذلك.</p>
+      </details>
     </section>
 
     <section class="card">
@@ -2973,6 +2994,10 @@ $("proxyTest").onclick = async () => {
 
 $("extExport").onclick = async () => {
   try { const r = await api("/api/ext_folder", {}); $("extPath").textContent = "✓ " + r.path; }
+  catch (e) { $("extPath").textContent = e.message; }
+};
+$("extSafari").onclick = async () => {
+  try { const r = await api("/api/ext_folder", {safari: true}); $("extPath").textContent = "✓ " + r.safari; }
   catch (e) { $("extPath").textContent = e.message; }
 };
 $("extCopy").onclick = async () => {

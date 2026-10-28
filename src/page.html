@@ -384,6 +384,16 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <span class="sub" id="extPath"></span>
       </div>
       <p class="help">لا تحذف المجلد بعد التثبيت، فالمتصفح يقرأ الإضافة منه. وعند تحديث الأداة اضغط «تجهيز مجلد الإضافة» مرة أخرى ثم زر التحديث في صفحة الإضافات.</p>
+      <details style="margin-top:10px">
+        <summary style="cursor:pointer;font-weight:600">في Safari على الماك</summary>
+        <ol class="sub" style="margin:8px 0 0;padding-inline-start:20px;line-height:2">
+          <li>اضغط <button class="small" id="extSafari">تجهيز مجلد إضافة Safari</button> فيُنشأ مجلد <span class="ltr">MO Downloader Extension - Safari</span> (نسخة معدّلة خصيصاً لسفاري).</li>
+          <li>في Safari: الإعدادات ← متقدم ← فعّل «إظهار ميزات مطوّري الويب».</li>
+          <li>من قائمة «تطوير» اختر «إعدادات المطوّر…» ثم «إضافة امتداد مؤقت…» واختر مجلد سفاري.</li>
+          <li>في الإعدادات ← الامتدادات: فعّل MO Downloader، ثم «تعديل مواقع الويب» واجعل «مواقع الويب الأخرى» على «السماح». بدون هذا لا تستطيع الإضافة الوصول إلى البرنامج.</li>
+        </ol>
+        <p class="help">سفاري يحذف الامتداد المؤقت عند إغلاقه أو بعد ٢٤ ساعة، فتكرر الخطوة ٣. وفي سفاري لا يتوفر «تمرير تنزيلات المتصفح» لأن سفاري لا يسمح للإضافات بذلك.</p>
+      </details>
     </section>
 
     <section class="card">
@@ -951,6 +961,10 @@ $("proxyTest").onclick = async () => {
 
 $("extExport").onclick = async () => {
   try { const r = await api("/api/ext_folder", {}); $("extPath").textContent = "✓ " + r.path; }
+  catch (e) { $("extPath").textContent = e.message; }
+};
+$("extSafari").onclick = async () => {
+  try { const r = await api("/api/ext_folder", {safari: true}); $("extPath").textContent = "✓ " + r.safari; }
   catch (e) { $("extPath").textContent = e.message; }
 };
 $("extCopy").onclick = async () => {
