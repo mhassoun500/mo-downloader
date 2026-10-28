@@ -75,7 +75,12 @@ jobs:
           OSSL="$(brew --prefix openssl@3)/lib/ossl-modules"
           sudo mv "$OSSL" "$OSSL.hidden"
           mkdir -p "$RUNNER_TEMP/a2"
-          OPENSSL_MODULES="$M" "$A" --no-conf --dir="$RUNNER_TEMP/a2" --out=t.html -x4 -s4 https://www.gstatic.com/generate_204
+          U=https://raw.githubusercontent.com/aria2/aria2/master/README.rst
+          echo "-- without the bundled module (expected to fail like on a Mac without Homebrew):"
+          "$A" --no-conf --dir="$RUNNER_TEMP/a2" --out=without.txt "$U" 2>&1 | tail -3 || true
+          echo "-- with the bundled module (how the app runs it):"
+          OPENSSL_MODULES="$M" "$A" --no-conf --dir="$RUNNER_TEMP/a2" --out=with.txt -x4 -s4 "$U"
+          test -s "$RUNNER_TEMP/a2/with.txt"
           echo "aria2 HTTPS download OK with the bundled OpenSSL module"
           sudo mv "$OSSL.hidden" "$OSSL"
 
