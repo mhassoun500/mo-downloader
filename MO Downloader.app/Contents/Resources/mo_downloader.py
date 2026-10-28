@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.3"
+APP_VERSION = "2.3.1"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -371,10 +371,27 @@ def fetch_aria2_windows():
 
 
 ARIA2C = None  # set in main() once https_get exists
+ARIA2_BROKEN = {"why": None}  # aria2 crashed on this computer: stop using it until the app restarts
 
 
-def accel_on(proxy=None):
-    if not (ARIA2C and SETTINGS.get("accel", True)):
+def aria2_env():
+    """aria2 built against OpenSSL 3 loads a 'legacy' module at start; point it at the copy shipped with the app."""
+    env = os.environ.copy()
+    if ARIA2C:
+        mods = Path(ARIA2C).parent / "ossl-modules"
+        if mods.is_dir():
+            env["OPENSSL_MODULES"] = str(mods)
+    return env
+
+
+def aria2_failed(text):
+    """True when the failure is aria2 itself (not the site): such jobs are retried without acceleration."""
+    low = str(text).lower()
+    return "aria2" in low and not any(k in low for k in ("status=4", "status=5", "404", "not found"))
+
+
+def accel_on(proxy=None, flags=None):
+    if not (ARIA2C and SETTINGS.get("accel", True)) or ARIA2_BROKEN["why"] or (flags or {}).get("_no_accel"):
         return False
     return not (proxy and str(proxy).lower().startswith("socks"))  # aria2 only speaks http proxies
 
@@ -407,7 +424,7 @@ def aria2_run(url, dirpath, out=None, headers=None, cookiefile=None, proxy=None,
         cmd.append(f"--all-proxy={proxy}")
     cmd += ["--", url]
     flags = 0x08000000 if SYSTEM == "Windows" else 0
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags, env=aria2_env())
     rpc_url = f"http://127.0.0.1:{port}/jsonrpc"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -423,6 +440,9 @@ def aria2_run(url, dirpath, out=None, headers=None, cookiefile=None, proxy=None,
                 raise Cancelled()
             if proc.poll() is not None:
                 err = proc.stderr.read().decode("utf-8", "replace").strip()
+                if "exception" in err.lower() or "ossl" in err.lower():  # aria2 itself can't start here
+                    ARIA2_BROKEN["why"] = err[-200:]
+                    log(f"[aria2] disabled for this session: {err[-200:]}")
                 raise RuntimeError("aria2: " + (err[-300:] or f"exit {proc.returncode}"))
             time.sleep(0.5)
             try:
@@ -617,18 +637,20 @@ def run_file_job(job, req, flags):
     if out and (Path(outdir) / out).exists() and not Path(str(Path(outdir) / out) + ".aria2").exists():
         out = unique_path(outdir, out).name
 
+    fast = accel_on(proxy, flags)
+
     def prog(done, total, speed, path):
         with JOBS_LOCK:
             if path and not job.get("many"):
                 job["title"] = Path(path).name or job["title"]
-            job.update(status="downloading", stage="جارٍ التنزيل" + (" (مسرّع)" if accel_on(proxy) else ""),
+            job.update(status="downloading", stage="جارٍ التنزيل" + (" (مسرّع)" if fast else ""),
                        downloaded=done, total=total, speed=speed,
                        eta=int((total - done) / speed) if (total and speed) else None,
                        percent=(done / total * 100) if total else None)
 
     stop = lambda: bool(job.get("cancel"))  # noqa: E731
     try:
-        if accel_on(proxy):
+        if fast:
             path = aria2_run(req["url"], str(outdir), out, headers, cookiefile, proxy, prog, stop)
         else:
             path = py_download(req["url"], str(outdir), out, headers, cookiefile, proxy, prog, stop)
@@ -976,7 +998,7 @@ def build_download_opts(req, job, logger):
     opts["paths"] = {"home": str(outdir)}
     opts["continuedl"] = True
     opts["overwrites"] = False
-    if accel_on(opts.get("proxy")):
+    if accel_on(opts.get("proxy"), req):
         opts["external_downloader"] = {"http": ARIA2C, "https": ARIA2C}
         opts["concurrent_fragment_downloads"] = max(4, min(16, int(SETTINGS.get("accel_conns") or 8)))
 
@@ -1152,7 +1174,10 @@ def run_job(job_id):
             if not code and not job.get("failed"):
                 break
             failed_text = " ".join(job.get("errors") or []) + " " + str(crash or "")
-            if "_use_cookies" not in flags and is_auth_error(failed_text) and ext_cookies_for(req["url"]):
+            if "_no_accel" not in flags and aria2_failed(failed_text):
+                flags["_no_accel"] = True
+                stage = "تعذّر التسريع على هذا الجهاز — إكمال التنزيل بالطريقة العادية…"
+            elif "_use_cookies" not in flags and is_auth_error(failed_text) and ext_cookies_for(req["url"]):
                 flags["_use_cookies"] = True
                 stage = "الموقع يطلب تسجيل الدخول — إعادة المحاولة بكوكيز المتصفح…"
             elif "_use_proxy" not in flags and proxy_fallback_on() and is_network_error(failed_text):
@@ -1764,6 +1789,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ffmpeg": bool(FFMPEG), "js": list(JS_RUNTIMES.keys()), "cookie_file": COOKIE_FILE.exists(),
                 "settings": {k: v for k, v in SETTINGS.items() if k != "engine_checked"},
                 "system": SYSTEM, "has_extension": bool(extension_source()), "aria2": bool(ARIA2C),
+                "aria2_broken": ARIA2_BROKEN["why"],
             })
         if u.path == "/api/history":
             return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 300)))
@@ -2507,7 +2533,8 @@ async function loadStatus() {
     box.append(el("span", {class: "pill ok", text: "yt-dlp " + s.ytdlp}));
     if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
     box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
-    if (s.aria2 && s.settings.accel !== false) box.append(el("span", {class: "pill ok", text: "تسريع ✓"}));
+    if (s.aria2 && s.settings.accel !== false && !s.aria2_broken) box.append(el("span", {class: "pill ok", text: "تسريع ✓"}));
+    if (s.aria2_broken) box.append(el("span", {class: "pill warn", text: "التسريع متوقف على هذا الجهاز"}));
     box.append(el("span", {class: "pill " + (s.js.length ? "ok" : "bad"), text: s.js.length ? "JS ✓" : "Deno غير موجود (يوتيوب محدود)"}));
     if (s.settings.proxy) box.append(el("span", {class: "pill", text: "بروكسي: " + (s.settings.proxy_mode === "always" ? "دائماً" : "عند الفشل")}));
     if (s.settings.cookies) box.append(el("span", {class: "pill", text: "كوكيز: " + (s.settings.cookies === "file" ? "ملف" : s.settings.cookies)}));

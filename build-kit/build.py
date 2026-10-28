@@ -52,6 +52,17 @@ def main():
     # aria2 (multi-connection downloads): CI puts the official Windows build / Homebrew's build in MO_ARIA2C
     aria2 = os.environ.get("MO_ARIA2C") or shutil.which("aria2c")
     print("aria2:", aria2 or "not bundled")
+    # Homebrew's aria2 uses OpenSSL 3, which loads a 'legacy' module from a Homebrew path at start-up.
+    # Ship that module next to aria2 (the app points OPENSSL_MODULES at it).
+    ossl_legacy = os.environ.get("MO_OSSL_LEGACY")
+    if SYSTEM == "Darwin" and aria2 and not ossl_legacy:
+        try:
+            prefix = subprocess.check_output(["brew", "--prefix", "openssl@3"], text=True).strip()
+            cand = Path(prefix) / "lib" / "ossl-modules" / "legacy.dylib"
+            ossl_legacy = str(cand) if cand.exists() else None
+        except Exception:
+            ossl_legacy = None
+    print("openssl legacy module:", ossl_legacy or "-")
     versions = {"yt-dlp": md.version("yt-dlp"), "yt-dlp-ejs": md.version("yt-dlp-ejs"), "app": app_version()}
     print("engine:", versions)
 
@@ -70,6 +81,7 @@ def main():
         "--collect-data", "certifi", "--hidden-import", "certifi",
         "--hidden-import", "tkinter", "--hidden-import", "tkinter.filedialog",
         *(["--add-binary", f"{aria2}{os.pathsep}aria2", "--add-data", f"{KIT / 'licenses'}{os.pathsep}licenses"] if aria2 else []),
+        *(["--add-binary", f"{ossl_legacy}{os.pathsep}aria2/ossl-modules"] if ossl_legacy else []),
     ]
     if SYSTEM == "Windows":
         args += ["--windowed", "--icon", ICO]

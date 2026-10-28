@@ -68,6 +68,16 @@ jobs:
           if otool -L "$A" | grep -E "/opt/homebrew|/usr/local/(opt|Cellar)"; then echo "aria2 still points at Homebrew libraries"; exit 1; fi
           brew uninstall --ignore-dependencies aria2 || true
           "$A" --version | head -1
+          # Simulate a Mac without Homebrew: hide Homebrew's OpenSSL modules, then download over HTTPS
+          # with only the copy shipped inside the app (this is exactly how the app starts aria2).
+          M="build-tmp/dist/MO Downloader.app/Contents/Frameworks/aria2/ossl-modules"
+          ls -la "$M"
+          OSSL="$(brew --prefix openssl@3)/lib/ossl-modules"
+          sudo mv "$OSSL" "$OSSL.hidden"
+          mkdir -p "$RUNNER_TEMP/a2"
+          OPENSSL_MODULES="$M" "$A" --no-conf --dir="$RUNNER_TEMP/a2" --out=t.html -x4 -s4 https://www.gstatic.com/generate_204
+          echo "aria2 HTTPS download OK with the bundled OpenSSL module"
+          sudo mv "$OSSL.hidden" "$OSSL"
 
       - uses: actions/upload-artifact@v4
         with:
