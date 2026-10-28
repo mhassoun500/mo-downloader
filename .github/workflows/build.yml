@@ -51,6 +51,17 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install innosetup -y --no-progress
 
+      - name: Get Microsoft WebView2 bootstrapper (Windows; bundled in the installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $f = "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
+          Invoke-WebRequest "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $f
+          $sig = Get-AuthenticodeSignature $f
+          if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Microsoft") { throw "unexpected signature: $($sig.Status) $($sig.SignerCertificate.Subject)" }
+          "MO_WEBVIEW2_SETUP=$f" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $f /silent /install | Out-Null
+
       - name: Build
         run: python build-kit/build.py
 
@@ -83,6 +94,27 @@ jobs:
           test -s "$RUNNER_TEMP/a2/with.txt"
           echo "aria2 HTTPS download OK with the bundled OpenSSL module"
           sudo mv "$OSSL.hidden" "$OSSL"
+
+      - name: Self-test the app window (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:MO_SELFTEST = "$env:RUNNER_TEMP\selftest.txt"; $env:MD_PORT = "8899"
+          $p = Start-Process -FilePath "build-tmp\dist\MO Downloader\MO Downloader.exe" -PassThru
+          $p | Wait-Process -Timeout 150 -ErrorAction SilentlyContinue
+          if (!$p.HasExited) { $p.Kill() }
+          if (Test-Path $env:MO_SELFTEST) { Get-Content $env:MO_SELFTEST } else { Get-Content "$env:USERPROFILE\.media_downloader\log.txt" -Tail 40; throw "no self-test result" }
+          if (-not (Select-String -Path $env:MO_SELFTEST -Pattern "^OK")) { Get-Content "$env:USERPROFILE\.media_downloader\log.txt" -Tail 40; throw "window self-test failed" }
+
+      - name: Self-test the app window (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export MO_SELFTEST="$RUNNER_TEMP/selftest.txt" MD_PORT=8899
+          "build-tmp/dist/MO Downloader.app/Contents/MacOS/MO Downloader" & PID=$!
+          for i in $(seq 1 150); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          kill $PID 2>/dev/null || true
+          if [ -f "$MO_SELFTEST" ]; then cat "$MO_SELFTEST"; else tail -40 ~/.media_downloader/log.txt; exit 1; fi
+          grep -q "^OK" "$MO_SELFTEST" || { tail -40 ~/.media_downloader/log.txt; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

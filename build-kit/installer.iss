@@ -39,6 +39,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#ifdef WebView2Setup
+; Microsoft's WebView2 runtime draws the app window; installed only if this PC doesn't have it yet
+Source: "{#WebView2Setup}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebview2Setup.exe"; Flags: deleteafterinstall; Check: NeedsWebView2
+#endif
 
 [InstallDelete]
 ; old engine files from a previous version
@@ -55,6 +59,9 @@ Root: HKCU; Subkey: "Software\Classes\mo-downloader\DefaultIcon"; ValueType: str
 Root: HKCU; Subkey: "Software\Classes\mo-downloader\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\MO Downloader.exe"" ""%1"""
 
 [Run]
+#ifdef WebView2Setup
+Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft WebView2…"; Flags: waituntilterminated; Check: NeedsWebView2
+#endif
 Filename: "{app}\MO Downloader.exe"; Description: "{cm:LaunchProgram,MO Downloader}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -62,3 +69,18 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ""MO Downloader.exe"""; Flag
 
 [UninstallDelete]
 Type: files; Name: "{userstartup}\MO Downloader.lnk"
+
+[Code]
+function HasWebView2(Root: Integer; Key: String): Boolean;
+var v: String;
+begin
+  Result := RegQueryStringValue(Root, Key, 'pv', v) and (v <> '') and (v <> '0.0.0.0');
+end;
+
+function NeedsWebView2: Boolean;
+var k: String;
+begin
+  k := 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  Result := not (HasWebView2(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}')
+                 or HasWebView2(HKLM, k) or HasWebView2(HKCU, k));
+end;

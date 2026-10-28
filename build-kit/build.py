@@ -44,7 +44,7 @@ def app_version():
 def main():
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet", "pip")
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet",
-        "pyinstaller", "yt-dlp[default]", "yt-dlp-ejs", "imageio-ffmpeg", "deno", "certifi")
+        "pyinstaller", "yt-dlp[default]", "yt-dlp-ejs", "imageio-ffmpeg", "deno", "certifi", "pywebview")
     import importlib.metadata as md
     import deno as deno_pkg
     deno_bin = Path(deno_pkg.find_deno_bin())
@@ -83,10 +83,15 @@ def main():
         *(["--add-binary", f"{aria2}{os.pathsep}aria2", "--add-data", f"{KIT / 'licenses'}{os.pathsep}licenses"] if aria2 else []),
         *(["--add-binary", f"{ossl_legacy}{os.pathsep}aria2/ossl-modules"] if ossl_legacy else []),
     ]
+    # the app's own window: the engine for each system is loaded at runtime, so name it explicitly
     if SYSTEM == "Windows":
-        args += ["--windowed", "--icon", ICO]
+        args += ["--windowed", "--icon", ICO,
+                 "--hidden-import", "webview.platforms.winforms", "--hidden-import", "webview.platforms.edgechromium",
+                 "--hidden-import", "clr", "--collect-all", "clr_loader", "--collect-all", "pythonnet"]
     elif SYSTEM == "Darwin":
-        args += ["--windowed", "--icon", ICNS, "--osx-bundle-identifier", "local.mo.downloader", "--argv-emulation"]
+        args += ["--windowed", "--icon", ICNS, "--osx-bundle-identifier", "local.mo.downloader", "--argv-emulation",
+                 "--hidden-import", "webview.platforms.cocoa", "--hidden-import", "WebKit", "--hidden-import", "Quartz",
+                 "--hidden-import", "Security", "--hidden-import", "UniformTypeIdentifiers", "--hidden-import", "PyObjCTools.AppHelper"]
     run(*args)
 
     out = WORK / "dist"
@@ -96,7 +101,9 @@ def main():
             Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Inno Setup 6" / "ISCC.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe"] if p.exists()), None)
         if iscc:
+            wv2 = os.environ.get("MO_WEBVIEW2_SETUP", "")
             run(iscc, f"/DMyAppVersion={versions['app']}", f"/DSourceDir={out / NAME}", f"/DIconFile={ICO}",
+                *([f"/DWebView2Setup={wv2}"] if wv2 and Path(wv2).exists() else []),
                 f"/O{DIST}", KIT / "installer.iss")
             print("\nDONE:", DIST / f"MO-Downloader-{versions['app']}-Setup.exe")
         else:

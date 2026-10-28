@@ -127,6 +127,9 @@ async function openUI(url) {
     const cookies = await netscapeCookies(url);
     if (cookies) await call("api/ext/cookies", { url, cookies }).catch(() => {});
   }
+  // the app has its own window: bring it up there instead of opening a browser tab
+  const shown = await call("api/ext/show", { url: url || "" }).catch(() => ({}));
+  if (shown.window) return { ok: true, window: true };
   await ext.tabs.create({ url: b + (url ? "?url=" + encodeURIComponent(url) : "") });
   return { ok: true };
 }

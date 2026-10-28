@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.4"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -95,6 +95,7 @@ DEFAULT_SETTINGS = {
     "accel": True,              # multi-connection downloads through aria2
     "accel_conns": 8,
     "ext_cookies": "auto",      # cookies sent by the browser extension: auto (only when a site needs login) | always | never
+    "ui": "window",             # window = the app's own window | browser = the default web browser
     "engine_checked": 0,
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
@@ -1615,6 +1616,130 @@ def proxy_test(proxy):
     return {"ok": True, "ms": int((time.time() - t) * 1000)}
 
 
+# ---------------------------------------------------------------- the app's own window
+UI = {"win": None, "base": None, "gui": None}
+SELFTEST = os.environ.get("MO_SELFTEST")  # CI: open the window, check the page really loaded, then quit
+
+
+def busy():
+    with JOBS_LOCK:
+        return any(j["status"] in RUNNING + ("queued",) for j in JOBS.values())
+
+
+def _on_main_thread(fn):
+    """macOS UI calls must run on the main thread."""
+    if SYSTEM == "Darwin":
+        try:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(fn)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    fn()
+
+
+def _mac_bring_front():
+    try:
+        import AppKit
+        AppKit.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def show_window(url=None):
+    """Bring the app window back (from the Dock/taskbar icon, a second launch, or the browser extension)."""
+    w = UI["win"]
+    if not w:
+        return False
+    try:
+        if url:
+            w.load_url(url)
+        w.show()
+        try:
+            w.restore()
+        except Exception:  # noqa: BLE001
+            pass
+        if SYSTEM == "Darwin":
+            _on_main_thread(_mac_bring_front)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"[window] show failed: {e}")
+        return False
+
+
+def quit_app():
+    w = UI["win"]
+    if w:
+        try:
+            w.destroy()  # ends webview.start() in main(); main() then stops the server
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=SERVER.shutdown, daemon=True).start()
+
+
+def _mac_reopen_hook():
+    """Clicking the Dock icon while the window is hidden brings it back."""
+    try:
+        import objc
+        from webview.platforms.cocoa import BrowserView
+
+        def reopen(self, app, has_visible):
+            threading.Thread(target=show_window, daemon=True).start()
+            return True
+        objc.classAddMethods(BrowserView.AppDelegate, [
+            objc.selector(reopen, selector=b"applicationShouldHandleReopen:hasVisibleWindows:", signature=b"Z@:@Z")])
+    except Exception as e:  # noqa: BLE001
+        log(f"[window] dock reopen hook not installed: {e}")
+
+
+def window_wanted():
+    return SETTINGS.get("ui", "window") == "window" and not os.environ.get("MD_NO_WINDOW")
+
+
+def run_window(url, hidden):
+    """Show the interface in the app's own window (WebView2 on Windows, WebKit on macOS). Blocks until quit.
+    Returns False if no native window is possible here, so the caller can use the browser instead."""
+    webview = ensure("pywebview", "webview", required=False)
+    if not webview:
+        return False
+    win = webview.create_window(APP_NAME, url, width=1200, height=880, min_size=(760, 560), hidden=hidden,
+                                background_color="#f4f1ea", text_select=True)
+    UI["win"], UI["base"] = win, url
+
+    def on_closing():
+        # downloads running, or the app is meant to stay on (started with the computer): hide, don't quit
+        if not SELFTEST and (busy() or BACKGROUND or SETTINGS.get("autostart")):
+            threading.Thread(target=win.hide, daemon=True).start()
+            return False
+        return True
+    win.events.closing += on_closing
+
+    if SELFTEST:
+        def check():
+            ok, title = False, None
+            for _ in range(60):
+                try:
+                    title = win.evaluate_js("document.title")
+                    if title == APP_NAME and win.evaluate_js("!!document.getElementById('nav')"):
+                        ok = True
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(1)
+            Path(SELFTEST).write_text(f"{'OK' if ok else 'FAIL'} gui={UI.get('gui')} title={title!r}\n", encoding="utf-8")
+            win.destroy()
+        win.events.loaded += lambda: threading.Thread(target=check, daemon=True).start()
+
+    if SYSTEM == "Darwin":
+        _mac_reopen_hook()
+    gui = os.environ.get("MO_GUI") or ("edgechromium" if SYSTEM == "Windows" else "cocoa" if SYSTEM == "Darwin" else "qt")
+    UI["gui"] = gui or "native"
+    (APP_DATA / "webview").mkdir(parents=True, exist_ok=True)
+    webview.start(gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"))
+    return True
+
+
 def public_job(j):
     return {k: v for k, v in j.items() if not k.startswith("_")}
 
@@ -1687,7 +1812,7 @@ def ext_download(req):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MODownloader/2.3"
+    server_version = "MODownloader/2.4"
 
     def log_message(self, *_):
         pass
@@ -1763,6 +1888,12 @@ class Handler(BaseHTTPRequestHandler):
                 b = self._body()
                 store_ext_cookies(str(b.get("url") or ""), b.get("cookies"))
                 return self._send_ext(200, {"ok": True})
+            if method == "POST" and u.path == "/api/ext/show":
+                b = self._body()
+                base = f"http://127.0.0.1:{self.server.server_address[1]}/"
+                target = base + ("?url=" + urllib.request.quote(str(b["url"]), safe="") if b.get("url") else "")
+                shown = show_window(target if b.get("url") else None)
+                return self._send_ext(200, {"window": shown, "url": target})
             if method == "POST" and u.path == "/api/ext/open_folder":
                 open_path(SETTINGS["outdir"])
                 return self._send_ext(200, {"ok": True})
@@ -1800,7 +1931,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ffmpeg": bool(FFMPEG), "js": list(JS_RUNTIMES.keys()), "cookie_file": COOKIE_FILE.exists(),
                 "settings": {k: v for k, v in SETTINGS.items() if k != "engine_checked"},
                 "system": SYSTEM, "has_extension": bool(extension_source()), "aria2": bool(ARIA2C),
-                "aria2_broken": ARIA2_BROKEN["why"],
+                "aria2_broken": ARIA2_BROKEN["why"], "in_window": bool(UI["win"]),
             })
         if u.path == "/api/history":
             return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 300)))
@@ -1925,6 +2056,8 @@ class Handler(BaseHTTPRequestHandler):
                     changed["accel_conns"] = max(1, min(16, int(req["accel_conns"])))
                 if req.get("ext_cookies") in ("auto", "always", "never"):
                     changed["ext_cookies"] = req["ext_cookies"]
+                if req.get("ui") in ("window", "browser"):
+                    changed["ui"] = req["ui"]
                 SETTINGS.update(changed)
                 save_settings()
                 if "autostart" in req:
@@ -1960,7 +2093,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if p == "/api/shutdown":
                 self._send(200, {"ok": True})
-                threading.Thread(target=SERVER.shutdown, daemon=True).start()
+                threading.Thread(target=quit_app, daemon=True).start()
                 return None
             self._send(404, {"error": "not found"})
         except Exception as e:  # noqa: BLE001
@@ -1979,12 +2112,16 @@ def free_port(preferred):
 
 
 def already_running(port):
-    """If MO Downloader is already open, just show it instead of starting a second copy."""
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1.5) as r:
-            return json.loads(r.read()).get("app") == APP_NAME
-    except Exception:  # noqa: BLE001
-        return False
+    """If MO Downloader is already open (on any of the ports it may use), return that port."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for p in range(port, port + 6):
+        try:
+            with opener.open(f"http://127.0.0.1:{p}/api/ping", timeout=1.0) as r:
+                if json.loads(r.read()).get("app") == APP_NAME:
+                    return p
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 SERVER = None
@@ -1999,10 +2136,20 @@ def main():
     except Exception as e:  # noqa: BLE001
         log(f"[aria2] progress hook not installed: {e}")
     Path(SETTINGS["outdir"]).mkdir(parents=True, exist_ok=True)
-    if already_running(DEFAULT_PORT):
+    running_port = already_running(DEFAULT_PORT)
+    if running_port:
         if not BACKGROUND:
-            log("MO Downloader is already running - opening it in the browser.")
-            webbrowser.open(f"http://127.0.0.1:{DEFAULT_PORT}/")
+            shown = False
+            try:  # ask the running copy to show its window
+                r = urllib.request.Request(f"http://127.0.0.1:{running_port}/api/ext/show", data=b"{}",
+                                           headers={"X-MO-Ext": "1", "Content-Type": "application/json"})
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(r, timeout=3) as resp:
+                    shown = bool(json.loads(resp.read()).get("window"))
+            except Exception:  # noqa: BLE001
+                pass
+            if not shown:
+                log("MO Downloader is already running - opening it in the browser.")
+                webbrowser.open(f"http://127.0.0.1:{running_port}/")
         return
     port = free_port(DEFAULT_PORT)
     server = SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -2018,12 +2165,24 @@ def main():
     print(f"  Downloads folder: {SETTINGS['outdir']}")
     print("  Close this window (or press the stop button in the page) to quit.")
     print("=" * 60, flush=True)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    if window_wanted():
+        try:
+            if run_window(url, hidden=BACKGROUND):  # returns when the user quits
+                server.shutdown()
+                log("MO Downloader stopped.")
+                return
+        except Exception as e:  # noqa: BLE001
+            log(f"[window] not available, using the browser instead: {e}")
+            UI["win"] = None
     if not BACKGROUND and not os.environ.get("MD_NO_BROWSER"):
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
-        server.serve_forever()
+        while serving.is_alive():
+            serving.join(1)
     except KeyboardInterrupt:
-        pass
+        server.shutdown()
     log("MO Downloader stopped.")
 
 

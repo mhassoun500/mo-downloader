@@ -27,9 +27,9 @@ fi
 case " $* " in *" --background "*) ;; *) osascript -e 'display notification "Starting… (the first launch can take a minute)" with title "MO Downloader"' >/dev/null 2>&1;; esac
 {
   echo "=== $(date) — $PY"
-  "$PY" -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default]" imageio-ffmpeg deno 2>/dev/null \
-   || "$PY" -m pip install -U --quiet --user "yt-dlp[default]" imageio-ffmpeg deno 2>/dev/null \
-   || "$PY" -m pip install -U --quiet --break-system-packages "yt-dlp[default]" imageio-ffmpeg deno
+  "$PY" -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default]" imageio-ffmpeg deno pywebview 2>/dev/null \
+   || "$PY" -m pip install -U --quiet --user "yt-dlp[default]" imageio-ffmpeg deno pywebview 2>/dev/null \
+   || "$PY" -m pip install -U --quiet --break-system-packages "yt-dlp[default]" imageio-ffmpeg deno pywebview
 } >>"$LOG" 2>&1
 
 export MO_APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"

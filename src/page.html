@@ -315,6 +315,11 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
           <select id="setAccel"><option value="on">مفعّل</option><option value="off">متوقف</option></select></div>
         <div class="opt"><label>عدد الاتصالات لكل ملف</label>
           <select id="setConns"><option>4</option><option>8</option><option>16</option></select></div>
+        <div class="opt"><label>طريقة فتح البرنامج</label>
+          <select id="setUi">
+            <option value="window">نافذة البرنامج الخاصة (موصى به)</option>
+            <option value="browser">في متصفح الإنترنت</option>
+          </select></div>
         <div class="opt"><label>تسجيل دخولك من إضافة المتصفح</label>
           <select id="setExtCk">
             <option value="auto">يُستخدم عند الحاجة فقط (موصى به)</option>
@@ -532,6 +537,7 @@ async function loadStatus() {
     $("setAccel").value = s.settings.accel === false ? "off" : "on";
     $("setConns").value = String([4, 8, 16].includes(+s.settings.accel_conns) ? +s.settings.accel_conns : 8);
     $("setExtCk").value = s.settings.ext_cookies || "auto";
+    $("setUi").value = s.settings.ui || "window";
     $("accelHelp").textContent = s.aria2
       ? "التسريع يقسم الملف إلى أجزاء تُحمَّل معاً، ويتيح الإيقاف المؤقت والاستئناف من نفس النقطة. لا يعمل مع بروكسي socks5."
       : "أداة التسريع (aria2) غير متوفرة في هذه النسخة، فتعمل التنزيلات باتصال واحد.";
@@ -548,7 +554,9 @@ $("setSave").onclick = async () => {
   try {
     await api("/api/settings", { outdir: $("setOutdir").value, max_parallel: +$("setParallel").value,
       check_hours: +$("setHours").value, autostart: $("setAuto").checked,
-      accel: $("setAccel").value === "on", accel_conns: +$("setConns").value, ext_cookies: $("setExtCk").value });
+      accel: $("setAccel").value === "on", accel_conns: +$("setConns").value, ext_cookies: $("setExtCk").value,
+      ui: $("setUi").value });
+    if ($("setUi").value !== (S.settings.ui || "window")) $("setmsg").textContent = "✓ تم الحفظ — يُطبَّق عند فتح البرنامج المرة القادمة";
     for (const id of ["outdir", "ploutdir", "boutdir", "soutdir"]) $(id).value = $("setOutdir").value;
     $("setmsg").textContent = "✓ تم الحفظ"; setTimeout(() => $("setmsg").textContent = "", 2500);
     loadStatus();
