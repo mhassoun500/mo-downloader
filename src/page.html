@@ -130,6 +130,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     <button data-p="batch">عدة روابط</button>
     <button data-p="subs">متابعة القنوات <span class="n" id="n-subs">0</span></button>
     <button data-p="hist">السجل <span class="n" id="n-hist">0</span></button>
+    <button data-p="sites">المواقع المدعومة</button>
     <button data-p="settings">الإعدادات</button>
   </nav>
 
@@ -162,6 +163,15 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         </div>
       </div>
       <div id="prev" class="msg warn hidden"></div>
+      <div id="livebox" class="clip hidden" style="border-color:var(--bad)">
+        <b>🔴 <span id="liveTitle">هذا بث مباشر</span></b>
+        <div class="row" style="margin-top:10px">
+          <label class="toggle"><input type="radio" name="liveMode" value="now" checked> سجّل من الآن</label>
+          <label class="toggle"><input type="radio" name="liveMode" value="start"> سجّل من بداية البث (إن أتاحه الموقع)</label>
+          <button class="primary" id="liveGo">⏺ تسجيل البث</button>
+        </div>
+        <div class="help">يستمر التسجيل حتى ينتهي البث أو تضغط «⏹ إيقاف التسجيل وحفظه» في قائمة التنزيلات، ويُحفظ ما سُجّل.</div>
+      </div>
 
       <div class="tabs" id="tabs">
         <button class="tab" data-k="av">فيديو بصوت <span class="n" id="n-av">0</span></button>
@@ -209,6 +219,14 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <div class="pick" id="pick">اختر جودة من الجدول</div>
         <button class="primary" id="download" disabled>تنزيل</button>
       </div>
+    </section>
+
+    <section class="card hidden" id="galresult">
+      <h2>🖼️ <span id="galtitle"></span></h2>
+      <p class="sub">هذا الرابط معرض أو منشور فيه صور أو ملفات متعددة، وسيُنزَّل بالمحرك الثاني
+        (<span class="ltr">gallery-dl</span>) مع الحفاظ على أسماء الملفات وترتيبها.</p>
+      <div class="opts"><div class="opt"><label>مجلد الحفظ</label><input type="text" id="galoutdir" class="ltr"></div></div>
+      <div class="go"><div class="pick" id="galhint"></div><button class="primary" id="galgo">تنزيل كل الملفات</button></div>
     </section>
 
     <section class="card hidden" id="plresult">
@@ -298,6 +316,26 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     </section>
   </div>
 
+  <!-- ============ supported sites ============ -->
+  <div class="panel hidden" id="p-sites">
+    <section class="card">
+      <h2>اختبر رابطاً</h2>
+      <p class="sub">يعرض أي محرك يدعم الرابط، والطريقة التي نجحت في قراءته، قبل أن تنزّل.</p>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="turl" class="grow ltr" placeholder="https://..." spellcheck="false">
+        <button class="primary" id="tgo">اختبر هذا الرابط</button>
+      </div>
+      <div id="tres" class="msg hidden"></div>
+    </section>
+    <section class="card">
+      <div class="section-h"><h3>المواقع المدعومة <span class="badge" id="scount"></span></h3></div>
+      <input type="text" id="sq" placeholder="ابحث باسم الموقع… (مثل instagram أو tiktok أو vimeo)" style="width:100%">
+      <p class="help">المحرك الأول (<span class="ltr">yt-dlp</span>) للفيديو والصوت، والثاني (<span class="ltr">gallery-dl</span>) للصور والمعارض.
+        والمواقع غير الموجودة في القائمة كثيراً ما تعمل أيضاً عن طريق البحث العام في الصفحة، أو التقاط البث من إضافة المتصفح.</p>
+      <div class="list" id="slist2"></div>
+    </section>
+  </div>
+
   <!-- ============ settings ============ -->
   <div class="panel hidden" id="p-settings">
     <section class="card settings">
@@ -352,6 +390,20 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       </div>
       <div id="cookiehelp" class="msg info">لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.</div>
       <div id="cmsg" class="msg hidden"></div>
+    </section>
+
+    <section class="card">
+      <h2>محرك التنزيل</h2>
+      <p class="sub" id="engVers"></p>
+      <div class="opts">
+        <div class="opt"><label>قناة التحديث</label>
+          <select id="engChan">
+            <option value="stable">مستقرة (موصى به)</option>
+            <option value="nightly">يومية — إصلاحات المواقع تصل إليها أولاً</option>
+          </select></div>
+      </div>
+      <div class="go"><span class="pick" id="engMsg"></span><button class="primary" id="engNow">تحديث المحرك الآن</button></div>
+      <p class="help">إذا توقف موقع عن العمل فجأة، فغالباً غيّر نظامه: حدّث المحرك ثم أعد تشغيل البرنامج. وإن لم يُحل، جرّب القناة اليومية.</p>
     </section>
 
     <section class="card">
@@ -515,6 +567,7 @@ function showPanel(p) {
   store.set("md_panel", p);
   if (p === "hist") loadHistory();
   if (p === "subs") loadSubs();
+  if (p === "sites") loadSites();
 }
 document.querySelectorAll("#nav button").forEach(b => b.onclick = () => showPanel(b.dataset.p));
 
@@ -525,6 +578,7 @@ async function loadStatus() {
     const box = $("status"); box.textContent = "";
     box.append(el("span", {class: "pill ok", text: "yt-dlp " + s.ytdlp}));
     if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
+    if (s.gallery) box.append(el("span", {class: "pill ok", text: "محركان ✓"}));
     box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
     if (s.aria2 && s.settings.accel !== false && !s.aria2_broken) box.append(el("span", {class: "pill ok", text: "تسريع ✓"}));
     if (s.aria2_broken) box.append(el("span", {class: "pill warn", text: "التسريع متوقف على هذا الجهاز"}));
@@ -538,6 +592,16 @@ async function loadStatus() {
     $("setConns").value = String([4, 8, 16].includes(+s.settings.accel_conns) ? +s.settings.accel_conns : 8);
     $("setExtCk").value = s.settings.ext_cookies || "auto";
     $("setUi").value = s.settings.ui || "window";
+    $("galoutdir").value = $("galoutdir").value || s.settings.outdir;
+    const eng = s.engine || {};
+    $("engChan").value = eng.channel || "stable";
+    $("engVers").textContent = "";
+    $("engVers").append("المحرك الأول ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
+      " · المحرك الثاني ", el("span", {class: "ltr", text: "gallery-dl " + (s.gallery || "غير متوفر")}),
+      " · انتحال بصمة المتصفح: " + (s.impersonate ? "متاح ✓" : "غير متاح"));
+    $("engMsg").textContent = eng.updating ? "جارٍ التحديث…" : (eng.msg || "");
+    $("engNow").disabled = !!eng.updating;
+    if (eng.updating) setTimeout(loadStatus, 2000);
     $("accelHelp").textContent = s.aria2
       ? "التسريع يقسم الملف إلى أجزاء تُحمَّل معاً، ويتيح الإيقاف المؤقت والاستئناف من نفس النقطة. لا يعمل مع بروكسي socks5."
       : "أداة التسريع (aria2) غير متوفرة في هذه النسخة، فتعمل التنزيلات باتصال واحد.";
@@ -587,15 +651,30 @@ async function analyze() {
   const url = $("url").value.trim();
   if (!url) { showMsg("msg", "الصق رابطاً أولاً."); return; }
   S.url = url; $("analyze").disabled = true;
-  $("result").classList.add("hidden"); $("plresult").classList.add("hidden");
+  $("result").classList.add("hidden"); $("plresult").classList.add("hidden"); $("galresult").classList.add("hidden");
   showMsg("msg", "جارٍ قراءة الصفحة واستخراج كل الجودات…", "loading");
   try {
     const info = await api("/api/info", { url, playlist: $("playlist").checked });
-    S.info = info; showMsg("msg", info.via_proxy ? "تعذّر الاتصال المباشر بالموقع، فتم الوصول إليه عبر البروكسي." : "", "info");
-    if (info.type === "playlist") renderPlaylist(info); else renderVideo(info);
+    S.info = info;
+    showMsg("msg", info.method && info.method !== "مباشر" ? "قُرئ الرابط بطريقة: " + info.method : "", "info");
+    if (info.type === "playlist") renderPlaylist(info);
+    else if (info.type === "gallery") renderGallery(info);
+    else renderVideo(info);
   } catch (e) { showMsg("msg", e.message); }
   finally { $("analyze").disabled = false; }
 }
+function renderGallery(info) {
+  $("galresult").classList.remove("hidden");
+  $("galtitle").textContent = info.site + " — " + info.url;
+  if (!$("galoutdir").value) $("galoutdir").value = S.settings.outdir || "";
+  $("galhint").textContent = "يُنشأ مجلد باسم الموقع داخل مجلد الحفظ.";
+}
+$("galgo").onclick = async () => {
+  try {
+    await api("/api/download", { url: S.url, kind: "gallery", outdir: $("galoutdir").value.trim(), title: S.info.site, label: "معرض · gallery-dl" });
+    poll(); flash($("galgo"));
+  } catch (e) { showMsg("msg", e.message); }
+};
 function renderVideo(info) {
   $("result").classList.remove("hidden");
   const th = $("thumb");
@@ -607,6 +686,9 @@ function renderVideo(info) {
   if (info.duration) row.append(el("span", {text: "⏱ " + fmtDur(info.duration)}));
   if (info.site) row.append(el("span", {text: "🌐 " + info.site}));
   if (info.is_live) row.append(el("span", {text: "🔴 بث مباشر"}));
+  const live = info.is_live || info.live_status === "is_upcoming";
+  $("livebox").classList.toggle("hidden", !live);
+  $("liveTitle").textContent = info.live_status === "is_upcoming" ? "بث لم يبدأ بعد — ستنتظر الأداة بدايته ثم تسجّله" : "هذا بث مباشر";
   const pv = $("prev");
   if (info.previous) {
     pv.textContent = ""; pv.classList.remove("hidden");
@@ -742,6 +824,72 @@ async function downloadPlaylist() {
   } catch (e) { showMsg("msg", e.message); }
 }
 
+$("liveGo").onclick = async () => {
+  const mode = document.querySelector("input[name=liveMode]:checked").value;
+  try {
+    await api("/api/download", { ...singleOpts(), mode: "preset", preset: "best", live: mode, clip_start: "", clip_end: "",
+      label: mode === "start" ? "بث مباشر · من البداية" : "بث مباشر · من الآن" });
+    poll(); flash($("liveGo"));
+  } catch (e) { showMsg("msg", e.message); }
+};
+
+// ---------- supported sites + link tester
+let SITES = null;
+async function loadSites() {
+  if (!SITES) {
+    $("slist2").textContent = ""; $("slist2").append(el("p", {class: "empty", text: "جارٍ تحميل القائمة…"}));
+    try { SITES = (await api("/api/sites")).sites; } catch (e) { $("slist2").textContent = e.message; return; }
+  }
+  const q = $("sq").value.trim().toLowerCase();
+  const hits = q ? SITES.filter(x => (x.n + " " + x.d).toLowerCase().includes(q)) : SITES;
+  const yt = SITES.filter(x => x.e === "yt-dlp").length, gd = SITES.length - yt;
+  $("scount").textContent = (q ? hits.length + " من " : "") + SITES.length + " (" + yt + " فيديو · " + gd + " صور ومعارض)";
+  const box = $("slist2"); box.textContent = "";
+  for (const x of hits.slice(0, 300)) {
+    box.append(el("div", {class: "item" + (x.w ? "" : " off")}, el("div", {class: "body"},
+      el("div", {class: "t ltr", style: "text-align:left", text: x.n}),
+      el("div", {class: "s"}, el("span", {class: "badge" + (x.e === "gallery-dl" ? "" : " ok"), text: x.e}),
+        x.d ? el("span", {class: "ltr", text: x.d}) : null, x.w ? null : el("span", {text: "معطّل حالياً في المحرك"})))));
+  }
+  if (hits.length > 300) box.append(el("p", {class: "help", text: "يُعرض أول 300 نتيجة — اكتب اسماً أدق."}));
+  if (!hits.length) box.append(el("p", {class: "empty", text: "لا يوجد في القائمة — جرّب «اختبر هذا الرابط» فكثير من المواقع تعمل بالبحث العام."}));
+}
+let sTimer = null;
+$("sq").addEventListener("input", () => { clearTimeout(sTimer); sTimer = setTimeout(loadSites, 200); });
+$("tgo").onclick = async () => {
+  const url = $("turl").value.trim(); if (!url) return;
+  $("tgo").disabled = true; showMsg("tres", "جارٍ اختبار الرابط…", "loading");
+  try {
+    const r = await api("/api/test_url", { url });
+    const lines = [];
+    lines.push("المحرك الأول (yt-dlp): " + (r.ytdlp ? "يدعمه باسم «" + r.ytdlp + "»" : "لا يوجد دعم خاص — يُجرَّب البحث العام في الصفحة"));
+    lines.push("المحرك الثاني (gallery-dl): " + (r.gallery ? "يدعمه باسم «" + r.gallery + "»" : "لا يدعمه"));
+    if (r.probe) {
+      const t = {video: "فيديو", playlist: "قائمة", gallery: "معرض صور/ملفات"}[r.probe.type] || r.probe.type;
+      lines.push("✓ النتيجة: " + t + (r.probe.title ? " — " + r.probe.title : "") +
+        (r.probe.formats ? " · " + r.probe.formats + " جودة" : "") + (r.probe.count ? " · " + r.probe.count + " عنصر" : ""));
+      lines.push("الطريقة التي نجحت: " + (r.probe.method || "مباشر"));
+    } else lines.push("✗ تعذّرت القراءة:\n" + r.error);
+    showMsg("tres", lines.join("\n"), r.probe ? "ok" : "err");
+  } catch (e) { showMsg("tres", e.message); }
+  finally { $("tgo").disabled = false; }
+};
+
+// ---------- engine
+$("engNow").onclick = async () => {
+  try { await api("/api/engine_update", { channel: $("engChan").value }); $("engMsg").textContent = "جارٍ التحقق…"; setTimeout(loadStatus, 1500); }
+  catch (e) { $("engMsg").textContent = e.message; }
+};
+$("engChan").onchange = () => api("/api/settings", { engine_channel: $("engChan").value }).then(loadStatus);
+
+// ---------- copy helper (works in the app window too)
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) {}
+  const ta = el("textarea", {style: "position:fixed;top:-1000px"}); ta.value = t; document.body.append(ta); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch (e) {}
+  ta.remove(); return ok;
+}
+
 // ---------- batch
 function batchUrls() { return [...new Set(($("burls").value.match(/https?:\/\/[^\s<>"']+/g) || []))]; }
 $("burls").addEventListener("input", () => {
@@ -869,8 +1017,10 @@ function renderJobs(jobs) {
     s.append(el("span", {text: j.stage || ""}));
     if (j.label) s.append(el("span", {class: "badge", text: j.label}));
     if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
-    if (j.via_proxy) s.append(el("span", {class: "badge", text: "عبر البروكسي"}));
-    if (j.via_cookies) s.append(el("span", {class: "badge", text: "بتسجيل دخولك"}));
+    if (j.method && j.method !== "مباشر" && j.status === "done") s.append(el("span", {class: "badge ok", text: "نجح بطريقة: " + j.method}));
+    else if (j.method_now && j.method_now !== "مباشر" && !["done", "error", "cancelled"].includes(j.status))
+      s.append(el("span", {class: "badge", text: j.method_now}));
+    if (j.gallery && j.done_count && j.status !== "done") s.append(el("span", {text: j.done_count + " ملف"}));
     if (j.many) {
       if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
       if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
@@ -887,15 +1037,28 @@ function renderJobs(jobs) {
     const bar = fin ? null : el("div", {class: "bar"}, el("i"));
     if (bar) bar.firstChild.style.width = (j.percent || 0) + "%";
     const acts = el("div", {class: "acts"});
-    if (["queued", "starting", "downloading", "processing"].includes(j.status) && !j.many)
+    const running = ["queued", "starting", "downloading", "processing"].includes(j.status);
+    if (running && j.live)
+      acts.append(el("button", {class: "small", text: "⏹ إيقاف التسجيل وحفظه", onclick: () => api("/api/stop_live", {id: j.id}).then(poll)}));
+    else if (running && !j.many && !j.gallery)
       acts.append(el("button", {class: "small", text: "⏸ إيقاف مؤقت", onclick: () => api("/api/pause", {id: j.id}).then(poll)}));
     if (j.status === "paused")
       acts.append(el("button", {class: "small", text: "▶ استئناف", onclick: () => api("/api/resume", {id: j.id}).then(poll)}));
     if (!["done", "error", "cancelled"].includes(j.status))
       acts.append(el("button", {class: "small", text: "إلغاء", onclick: () => api("/api/cancel", {id: j.id}).then(poll)}));
+    const folderOnly = j.many || j.gallery;
     if (j.status === "done" && (j.file || j.outdir))
-      acts.append(el("button", {class: "small", text: j.file && !j.many ? "إظهار الملف" : "فتح المجلد",
-        onclick: () => api("/api/open", {path: j.many ? j.outdir : (j.file || j.outdir), select: !!j.file && !j.many})}));
+      acts.append(el("button", {class: "small", text: j.file && !folderOnly ? "إظهار الملف" : "فتح المجلد",
+        onclick: () => api("/api/open", {path: folderOnly ? j.outdir : (j.file || j.outdir), select: !!j.file && !folderOnly})}));
+    if (j.status === "error" || (j.status === "done" && j.error)) {
+      const rb = el("button", {class: "small ghost", text: "نسخ تقرير الخطأ"});
+      rb.onclick = async () => {
+        try { const r = await api("/api/report", {id: j.id}); rb.textContent = (await copyText(r.text)) ? "✓ نُسخ" : "تعذّر النسخ"; }
+        catch (e) { rb.textContent = "تعذّر"; }
+        setTimeout(() => rb.textContent = "نسخ تقرير الخطأ", 2000);
+      };
+      acts.append(rb);
+    }
     if (j.status === "error" || j.status === "cancelled")
       acts.append(el("button", {class: "small", text: "إعادة المحاولة", onclick: () => api("/api/retry", {id: j.id}).then(poll)}));
     const title = j.many && j.current && j.status !== "done" ? j.title + " — " + j.current : j.title;

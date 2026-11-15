@@ -61,24 +61,53 @@ async function refreshJobs() {
   }
 }
 
+const qualities = new Map(); // url -> {loading} | {heights, audio} | {error}   (kept across list refreshes)
+const KIND_NAMES = { EMBED: "مشغّل مضمّن" };
+
 async function refreshMedia() {
   if (!tab || sniffOff) return;
   const r = await send({ type: "media", tabId: tab.id });
   const box = $("media");
-  box.textContent = "";
   const list = r.media || [];
+  const sig = JSON.stringify(list.map((m) => m.url)) + JSON.stringify([...qualities.entries()]);
+  if (box.dataset.sig === sig) return; // nothing changed: don't rebuild (keeps buttons stable under the mouse)
+  box.dataset.sig = sig;
+  box.textContent = "";
   if (!list.length) { box.append(el("div", "empty", "شغّل الفيديو في الصفحة وسيظهر هنا.")); return; }
   for (const m of list) {
     const row = el("div", "m");
-    const name = decodeURIComponent(m.url.split(/[?#]/)[0].split("/").pop() || m.url).slice(0, 80);
-    row.append(el("span", "k", m.kind), el("span", "n", name + (m.size ? "  ·  " + fmtSize(m.size) : "")));
-    const b1 = el("button", "mini", "تنزيل"), b2 = el("button", "mini", "صوت");
-    b1.title = m.url;
-    b1.onclick = () => grab(m.url, "best");
-    b2.onclick = () => grab(m.url, "audio");
-    row.append(b1, b2);
+    let name = decodeURIComponent(m.url.split(/[?#]/)[0].split("/").pop() || m.url);
+    if (m.kind === "EMBED") { try { name = new URL(m.url).hostname + new URL(m.url).pathname; } catch (e) {} }
+    row.append(el("span", "k", KIND_NAMES[m.kind] || m.kind), el("span", "n", name.slice(0, 80) + (m.size ? "  ·  " + fmtSize(m.size) : "")));
+    row.title = m.url;
+    const q = qualities.get(m.url);
+    if (q && q.heights) {
+      const wrap = el("div", "qs");
+      for (const h of q.heights) { const b = el("button", "mini", h + "p"); b.onclick = () => grab(m.url, String(h)); wrap.append(b); }
+      if (q.audio) { const b = el("button", "mini", "صوت"); b.onclick = () => grab(m.url, "audio"); wrap.append(b); }
+      if (!q.heights.length) { const b = el("button", "mini", "تنزيل"); b.onclick = () => grab(m.url, "best"); wrap.append(b); }
+      row.append(wrap);
+    } else {
+      const bq = el("button", "mini", q && q.loading ? "…" : "الجودات");
+      bq.disabled = !!(q && q.loading);
+      bq.title = q && q.error ? q.error : "اعرض الجودات المتاحة لهذا الفيديو";
+      bq.onclick = () => loadQualities(m.url);
+      const b1 = el("button", "mini", "تنزيل"), b2 = el("button", "mini", "صوت");
+      b1.onclick = () => grab(m.url, "best");
+      b2.onclick = () => grab(m.url, "audio");
+      row.append(bq, b1, b2);
+    }
     box.append(row);
   }
+}
+
+async function loadQualities(url) {
+  qualities.set(url, { loading: true });
+  refreshMedia();
+  const r = await send({ type: "formats", tabId: tab.id, url });
+  if (r.error) { qualities.set(url, { error: explain(r.error) }); show(explain(r.error), "err"); }
+  else qualities.set(url, { heights: r.heights || [], audio: !!r.audio });
+  refreshMedia();
 }
 
 async function grab(url, preset) {

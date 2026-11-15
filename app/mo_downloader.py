@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -96,6 +96,7 @@ DEFAULT_SETTINGS = {
     "accel_conns": 8,
     "ext_cookies": "auto",      # cookies sent by the browser extension: auto (only when a site needs login) | always | never
     "ui": "window",             # window = the app's own window | browser = the default web browser
+    "engine_channel": "stable", # stable | nightly (site fixes reach nightly builds first)
     "engine_checked": 0,
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
@@ -129,8 +130,13 @@ def use_downloaded_engine():
     if not FROZEN or not ENGINE_DIR.exists():
         return
     bundled = bundled_versions()
-    for prefix, key in (("yt_dlp_ejs", "yt-dlp-ejs"), ("yt_dlp", "yt-dlp")):
+    stable_only = SETTINGS.get("engine_channel", "stable") != "nightly"
+    for prefix, key in (("yt_dlp_ejs", "yt-dlp-ejs"), ("yt_dlp", "yt-dlp"), ("gallery_dl", "gallery-dl")):
         wheels = sorted(ENGINE_DIR.glob(f"{prefix}-[0-9]*.whl"), key=lambda p: _ver_key(_wheel_version(p)))
+        if stable_only:
+            for w in [w for w in wheels if "dev" in _wheel_version(w)]:
+                w.unlink(missing_ok=True)
+                wheels.remove(w)
         for old in wheels[:-1]:
             old.unlink(missing_ok=True)
         if wheels:
@@ -164,6 +170,17 @@ def ensure(pip_name, module=None, required=True):
 
 
 use_downloaded_engine()
+
+# gallery-dl runs as a child process: the app starts itself again with --gallery-dl (works the same in the
+# standalone build, which has no separate Python). Its output goes to the file named in MO_GDL_OUT.
+if len(sys.argv) > 1 and sys.argv[1] == "--gallery-dl":
+    _gdl_out = os.environ.get("MO_GDL_OUT")
+    if _gdl_out:
+        sys.stdout = sys.stderr = open(_gdl_out, "a", encoding="utf-8", buffering=1)
+    import gallery_dl as _gdl
+    sys.argv = ["gallery-dl"] + sys.argv[2:]
+    sys.exit(_gdl.main())
+
 try:
     yt_dlp = ensure("yt-dlp[default]", "yt_dlp")
 except Exception:  # noqa: BLE001  — a broken downloaded wheel must never brick the app
@@ -178,7 +195,17 @@ ensure("yt-dlp-ejs", "yt_dlp_ejs", required=False)
 from yt_dlp.postprocessor.common import PostProcessor  # noqa: E402
 from yt_dlp.utils import download_range_func, match_filter_func  # noqa: E402
 
-ENGINE = {"version": yt_dlp.version.__version__, "pending": None}
+ensure("curl-cffi", "curl_cffi", required=False)   # lets yt-dlp present itself like a real browser
+gallery_dl = ensure("gallery-dl", "gallery_dl", required=False)
+try:
+    from yt_dlp.networking.impersonate import ImpersonateTarget  # noqa: E402
+    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as _y:
+        IMPERSONATE = bool(_y._get_available_impersonate_targets())
+except Exception:  # noqa: BLE001
+    ImpersonateTarget, IMPERSONATE = None, False
+
+ENGINE = {"version": yt_dlp.version.__version__, "pending": None, "updating": False, "msg": "",
+          "gallery": getattr(getattr(gallery_dl, "version", None), "__version__", None)}
 
 
 def find_ffmpeg():
@@ -227,6 +254,12 @@ def find_js_runtimes():
 
 FFMPEG = find_ffmpeg()
 JS_RUNTIMES = find_js_runtimes()
+
+if len(sys.argv) > 2 and sys.argv[1] == "--engine-check":
+    Path(sys.argv[2]).write_text(json.dumps({
+        "yt_dlp": ENGINE["version"], "gallery_dl": ENGINE["gallery"], "impersonate": IMPERSONATE,
+        "ffmpeg": bool(FFMPEG), "js": sorted(JS_RUNTIMES)}), encoding="utf-8")
+    sys.exit(0)
 TOKEN = secrets.token_urlsafe(16)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -246,39 +279,112 @@ def https_get(url, timeout=30):
         return r.read()
 
 
-def engine_update_check():
-    """Standalone builds: fetch the newest yt-dlp from PyPI (at most once a day); used from next start."""
+ENGINE_PKGS = ("yt-dlp", "yt-dlp-ejs", "gallery-dl")
+
+
+def _latest_release(meta, nightly):
+    """(version, files) of the newest release; nightly = also pre-releases (yt-dlp's nightly builds)."""
+    if not nightly:
+        return meta["info"]["version"], meta["urls"]
+    best = None
+    for v, files in (meta.get("releases") or {}).items():
+        if files and not all(f.get("yanked") for f in files) and (best is None or _ver_key(v) > _ver_key(best)):
+            best = v
+    return best, meta["releases"][best]
+
+
+def _installed_version(name):
+    if name == "yt-dlp":
+        return ENGINE["version"]
+    if name == "gallery-dl" and ENGINE.get("gallery"):
+        return ENGINE["gallery"]
     if not FROZEN:
+        try:
+            import importlib.metadata as md
+            return md.version(name)
+        except Exception:  # noqa: BLE001
+            pass
+    return bundled_versions().get(name, "0")
+
+
+def _update_frozen(nightly):
+    """Standalone build: download newer pure-Python wheels (checked against PyPI's SHA-256); used from next start."""
+    import hashlib
+    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+    got = []
+    for name in ENGINE_PKGS:
+        meta = json.loads(https_get(f"https://pypi.org/pypi/{name}/json"))
+        latest, files = _latest_release(meta, nightly and name == "yt-dlp")
+        prefix = name.replace("-", "_")
+        have = [_wheel_version(p) for p in ENGINE_DIR.glob(f"{prefix}-[0-9]*.whl")]
+        if not latest or _ver_key(latest) <= _ver_key(_installed_version(name)) or latest in have:
+            continue
+        wheel = next((f for f in files if f["packagetype"] == "bdist_wheel" and f["filename"].endswith("-none-any.whl")), None)
+        if not wheel:
+            continue
+        data = https_get(wheel["url"], timeout=180)
+        if hashlib.sha256(data).hexdigest() != (wheel.get("digests") or {}).get("sha256"):
+            raise RuntimeError(f"{name}: checksum mismatch, update ignored")
+        tmp = ENGINE_DIR / (wheel["filename"] + ".part")
+        tmp.write_bytes(data)
+        tmp.replace(ENGINE_DIR / wheel["filename"])
+        got.append(f"{name} {latest}")
+    return got
+
+
+def _update_pip(nightly):
+    """Python version: upgrade the engines with pip (nightly = yt-dlp pre-releases)."""
+    import importlib.metadata as md
+    before = {n: _installed_version(n) for n in ENGINE_PKGS}
+    pkgs = ["yt-dlp[default,curl-cffi]", "yt-dlp-ejs", "gallery-dl"]
+    if not nightly and "dev" in before["yt-dlp"]:  # back to stable: pip won't downgrade on its own
+        stable = json.loads(https_get("https://pypi.org/pypi/yt-dlp/json"))["info"]["version"]
+        pkgs[0] = f"yt-dlp[default,curl-cffi]=={stable}"
+    base = [sys.executable, "-m", "pip", "install", "-U", "--quiet", "--disable-pip-version-check"] + (["--pre"] if nightly else [])
+    flags = 0x08000000 if SYSTEM == "Windows" else 0
+    for extra in ([], ["--user"], ["--break-system-packages"]):
+        r = subprocess.run(base + extra + pkgs, capture_output=True, timeout=900, creationflags=flags)
+        if r.returncode == 0:
+            break
+    else:
+        raise RuntimeError(r.stderr.decode("utf-8", "replace").strip()[-300:])
+    got = []
+    for n in ENGINE_PKGS:
+        try:
+            v = md.version(n)
+        except Exception:  # noqa: BLE001
+            continue
+        if v != before[n]:
+            got.append(f"{n} {v}")
+    return got
+
+
+def engine_update_check(force=False):
+    """Keep the download engines current: once a day on its own, or right away from the "update now" button.
+    New versions are used after the app restarts."""
+    if ENGINE["updating"]:
         return
-    if time.time() - float(SETTINGS.get("engine_checked") or 0) < 20 * 3600:
+    if not force and time.time() - float(SETTINGS.get("engine_checked") or 0) < 20 * 3600:
         return
+    if not force and not FROZEN:
+        return  # the Python version's launcher upgrades the engines with pip at start-up
+    ENGINE.update(updating=True, msg="جارٍ التحقق من تحديثات المحرك…")
     try:
-        ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-        pending = None
-        for name in ("yt-dlp", "yt-dlp-ejs"):
-            meta = json.loads(https_get(f"https://pypi.org/pypi/{name}/json"))
-            latest = meta["info"]["version"]
-            current = ENGINE["version"] if name == "yt-dlp" else bundled_versions().get(name, "0")
-            prefix = name.replace("-", "_")
-            have = [_wheel_version(p) for p in ENGINE_DIR.glob(f"{prefix}-[0-9]*.whl")]
-            if _ver_key(latest) <= _ver_key(current) or latest in have:
-                continue
-            files = [u for u in meta["urls"] if u["packagetype"] == "bdist_wheel" and u["filename"].endswith("-none-any.whl")]
-            if not files:
-                continue
-            data = https_get(files[0]["url"], timeout=120)
-            tmp = ENGINE_DIR / (files[0]["filename"] + ".part")
-            tmp.write_bytes(data)
-            tmp.replace(ENGINE_DIR / files[0]["filename"])
-            if name == "yt-dlp":
-                pending = latest
-        ENGINE["pending"] = pending
+        nightly = SETTINGS.get("engine_channel") == "nightly"
+        got = _update_frozen(nightly) if FROZEN else _update_pip(nightly)
+        if got:
+            ENGINE["pending"] = "، ".join(got)
+            ENGINE["msg"] = "تم تنزيل: " + ENGINE["pending"] + " — يُستخدم بعد إعادة تشغيل البرنامج."
+            log(f"[engine] updated: {got}")
+        else:
+            ENGINE["msg"] = "المحرك محدّث إلى آخر إصدار" + (" يومي." if nightly else " مستقر.")
         SETTINGS["engine_checked"] = time.time()
         save_settings()
-        if pending:
-            log(f"[engine] downloaded yt-dlp {pending}; it will be used after restart")
     except Exception as e:  # noqa: BLE001
+        ENGINE["msg"] = "تعذّر تحديث المحرك: " + str(e)[:200]
         log(f"[engine] update check failed: {e}")
+    finally:
+        ENGINE["updating"] = False
 
 
 # ---------------------------------------------------------------- state
@@ -697,8 +803,19 @@ def clean_err(e):
         hints.append("تعذّر الوصول إلى الموقع من شبكتك (قد يكون محجوباً أو الاتصال مقطوعاً). "
                      + ("جرّبت الأداة البروكسي أيضاً ولم ينجح؛ تأكد أن البروكسي يعمل من «اختبار البروكسي» في الإعدادات."
                         if SETTINGS.get("proxy") else "يمكنك ضبط بروكسي من تبويب الإعدادات لتعيد الأداة المحاولة عبره تلقائياً."))
-    if "unsupported url" in low:
-        hints.append("الرابط غير مدعوم أو لا يحتوي على وسائط قابلة للاستخراج.")
+    if is_block_error(msg) and not is_network_error(msg):
+        hints.append("الموقع رفض الاتصال لأنه يحمي نفسه من البرامج الآلية. جرّبت الأداة انتحال بصمة متصفح حقيقي. "
+                     "سجّل دخولك في الموقع من المتصفح، ثم نزّل الفيديو من زر إضافة المتصفح لتستخدم الأداة تسجيل دخولك.")
+    if is_no_media(msg):
+        hints.append("لم يُعثر على فيديو يفهمه المحرك في هذه الصفحة. شغّل الفيديو في المتصفح، ثم افتح نافذة إضافة "
+                     "المتصفح واختر من «فيديوهات التُقطت من هذه الصفحة».")
+    if any(k in low for k in ("video unavailable", "has been removed", "http error 404", "status=404", "http error 410",
+                              "no longer available", "does not exist")):
+        hints.append("الفيديو محذوف أو غير متاح، أو الرابط غير صحيح.")
+    if any(k in low for k in ("not available in your country", "geo restrict", "geo-restrict", "geo-blocked")):
+        hints.append("هذا المحتوى غير متاح في بلدك من مصدره.")
+    if any(k in low for k in ("premieres in", "live event will begin", "is_upcoming", "will begin in")):
+        hints.append("البث لم يبدأ بعد. أعد المحاولة عند بدايته، أو استخدم «تسجيل البث» لتنتظره الأداة.")
     if "js runtime" in low or "javascript runtime" in low:
         hints.append("ثبّت Deno ثم أعد تشغيل الأداة.")
     if "requested format is not available" in low:
@@ -718,6 +835,60 @@ NET_ERRORS = (
 def is_network_error(msg):
     low = str(msg).lower()
     return any(k in low for k in NET_ERRORS)
+
+
+# the site refuses automated clients -> try again presenting ourselves like a real browser
+BLOCK_ERRORS = ("http error 403", "http error 429", "http error 503", "status=403", "status=429", "cloudflare",
+                "captcha", "impersonat", "too many requests", "access denied", "unable to download webpage",
+                "unable to download api page", "anti-bot")
+# the page has no video yt-dlp understands -> try the gallery engine, then streams caught on the page
+NO_MEDIA_ERRORS = ("unsupported url", "no video formats", "not a video", "no media", "no video found",
+                   "there is no video", "no video could be found", "does not contain any video", "no formats found",
+                   "unable to extract", "no video in", "no videos found", "لم يُعثر على")
+
+
+def is_block_error(msg):
+    low = str(msg).lower()
+    return any(k in low for k in BLOCK_ERRORS)
+
+
+def is_no_media(msg):
+    low = str(msg).lower()
+    return any(k in low for k in NO_MEDIA_ERRORS)
+
+
+def gallery_site(url):
+    """gallery-dl's name for the site if it supports this link (images, albums, multi-file posts)."""
+    if not gallery_dl or not str(url).startswith(("http://", "https://")):
+        return None
+    try:
+        ex = gallery_dl.extractor.find(url)
+        return ex.category if ex else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+METHOD_NAMES = (("_alt_stream", "البث الملتقط من الصفحة"), ("_gallery", "المحرك الثاني (gallery-dl)"),
+                ("_impersonate", "انتحال بصمة المتصفح"), ("_use_cookies", "تسجيل دخولك"), ("_use_proxy", "البروكسي"))
+
+
+def method_label(flags):
+    parts = [name for key, name in METHOD_NAMES if flags.get(key)]
+    return " + ".join(parts) or "مباشر"
+
+
+def redact_url(url):
+    """For error reports: keep the site and path, drop query values that can hold tokens (except YouTube's v/list)."""
+    u = urlparse(str(url))
+    q = parse_qs(u.query)
+    keep = {k: v for k, v in q.items() if k in ("v", "list")} if "youtu" in (u.hostname or "") else {}
+    tail = ("?" + "&".join(f"{k}={v[0]}" for k, v in keep.items())) if keep else ("?…" if u.query else "")
+    host = (u.netloc or "").rsplit("@", 1)[-1]  # never user:password@
+    return f"{u.scheme}://{host}{u.path}{tail}"
+
+
+def redact_text(text):
+    return re.sub(r"https?://[^\s'\"<>)]+", lambda m: redact_url(m.group(0)), str(text or ""))
 
 
 def proxy_value():
@@ -781,6 +952,8 @@ def base_opts(req, logger=None):
         opts["ffmpeg_location"] = FFMPEG
     if JS_RUNTIMES:
         opts["js_runtimes"] = JS_RUNTIMES
+    if req.get("_impersonate") and IMPERSONATE:
+        opts["impersonate"] = ImpersonateTarget("chrome")
     if req.get("headers"):
         opts["http_headers"] = {k: v for k, v in req["headers"].items() if k.lower() not in ("cookie",)}
     if req.get("_use_cookies") or (SETTINGS.get("ext_cookies") == "always" and ext_cookies_for(req.get("url") or "")):
@@ -845,20 +1018,33 @@ def fmt_row(f, duration):
     }
 
 
+def gallery_info(url, site):
+    return {"type": "gallery", "title": site, "site": site, "url": url, "method": "المحرك الثاني (gallery-dl)"}
+
+
 def get_info(req):
     flags = {}
-    for _ in range(3):
+    url = (req.get("url") or "").strip()
+    for _ in range(5):
         try:
             info = _get_info({**req, **flags})
+            if info.get("type") == "playlist" and not info.get("count") and gallery_site(url):
+                return gallery_info(url, gallery_site(url))
+            info["method"] = method_label(flags)
             if flags.get("_use_proxy"):
                 info["via_proxy"] = True
             if flags.get("_use_cookies"):
                 info["via_cookies"] = True
             return info
         except Exception as e:  # noqa: BLE001
-            if "_use_cookies" not in flags and is_auth_error(e) and ext_cookies_for(req.get("url") or ""):
+            if "_impersonate" not in flags and IMPERSONATE and is_block_error(e):
+                log("[impersonate] info blocked, retrying as a real browser")
+                flags["_impersonate"] = True
+            elif "_use_cookies" not in flags and is_auth_error(e) and ext_cookies_for(url):
                 log("[cookies] info needs login, retrying with the browser's cookies")
                 flags["_use_cookies"] = True
+            elif is_no_media(e) and gallery_site(url):
+                return gallery_info(url, gallery_site(url))
             elif "_use_proxy" not in flags and proxy_fallback_on() and is_network_error(e):
                 log(f"[proxy] info failed directly ({str(e)[:120]}), retrying through proxy")
                 flags["_use_proxy"] = True
@@ -909,6 +1095,7 @@ def _get_info(req):
         "site": info.get("extractor_key"),
         "webpage_url": info.get("webpage_url") or url,
         "is_live": bool(info.get("is_live")),
+        "live_status": info.get("live_status"),
         "subtitles": sorted(set((info.get("subtitles") or {}).keys()))[:40],
         "previous": last_download(key),
         "formats": {
@@ -976,6 +1163,7 @@ def record_download(ydl, info, job):
         "size": os.path.getsize(fp) if fp and os.path.exists(fp) else None, "date": time.time(),
         "uploader": info.get("uploader") or info.get("channel"), "duration": info.get("duration"),
         "site": info.get("extractor_key"), "source": job.get("source_label") or "", "clip": job.get("clip") or "",
+        "method": job.get("method_now") or "مباشر",
     }
     with HISTORY_LOCK:
         HISTORY.append(entry)
@@ -999,7 +1187,7 @@ def build_download_opts(req, job, logger):
     opts["paths"] = {"home": str(outdir)}
     opts["continuedl"] = True
     opts["overwrites"] = False
-    if accel_on(opts.get("proxy"), req):
+    if accel_on(opts.get("proxy"), req) and not req.get("_impersonate"):  # aria2 can't present itself as a browser
         opts["external_downloader"] = {"http": ARIA2C, "https": ARIA2C}
         opts["concurrent_fragment_downloads"] = max(4, min(16, int(SETTINGS.get("accel_conns") or 8)))
 
@@ -1062,6 +1250,10 @@ def build_download_opts(req, job, logger):
         # never start the template with a field that can be empty followed by "/" — that makes an absolute path
         opts["outtmpl"] = {"default": name}
 
+    if req.get("live") in ("now", "start"):
+        opts["live_from_start"] = req["live"] == "start"
+        opts["wait_for_video"] = (15, 60)  # an upcoming stream: wait until it starts
+        job["live"] = True
     if req.get("playlist") or req.get("sub_id") or req.get("batch"):
         opts["ignoreerrors"] = "only_download"  # a private/removed item must not stop the rest
     if req.get("playlistend"):
@@ -1111,6 +1303,169 @@ def build_download_opts(req, job, logger):
     return opts
 
 
+def gallery_cmd():
+    return [sys.executable, "--gallery-dl"] if FROZEN else [sys.executable, str(Path(__file__).resolve()), "--gallery-dl"]
+
+
+def run_gallery_job(job, req, flags):
+    """Download a gallery / multi-file post with gallery-dl in a child process; files are reported as they land."""
+    if not gallery_dl:
+        raise RuntimeError("المحرك الثاني (gallery-dl) غير متوفر في هذه النسخة.")
+    url = req["url"]
+    outdir = outdir_of(req)
+    job["outdir"] = str(outdir)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    out, logf = TMP_DIR / f"gdl-{job['id']}.out", TMP_DIR / f"gdl-{job['id']}.log"
+    for f in (out, logf):
+        f.unlink(missing_ok=True)
+    args = gallery_cmd() + ["-o", "output.mode=pipe", "-o", "output.progress=false", "--write-log", str(logf),
+                            "-d", str(outdir)]
+    ck = cookie_file_for(url) if (flags.get("_use_cookies") or SETTINGS.get("ext_cookies") == "always") else None
+    browser = str(SETTINGS.get("cookies") or "")
+    if ck:
+        args += ["--cookies", ck]
+    elif browser == "file" and COOKIE_FILE.exists():
+        args += ["--cookies", str(COOKIE_FILE)]
+    elif browser and browser != "file":
+        args += ["--cookies-from-browser", browser]
+    if proxy_value() and (flags.get("_use_proxy") or SETTINGS.get("proxy_mode") == "always"):
+        args += ["--proxy", proxy_value()]
+    ua = (req.get("headers") or {}).get("User-Agent")
+    if ua:
+        args += ["--user-agent", ua]
+    args += ["--", url]
+    env = os.environ.copy()
+    env["MO_GDL_OUT"] = str(out)
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env=env, creationflags=0x08000000 if SYSTEM == "Windows" else 0)
+    files, skipped, pos = [], 0, 0
+    with JOBS_LOCK:
+        job.update(status="downloading", stage="جارٍ التنزيل بالمحرك الثاني (gallery-dl)…", percent=None, gallery=True)
+
+    def read_new():
+        nonlocal pos, skipped
+        if not out.exists():
+            return
+        with open(out, encoding="utf-8", errors="replace") as fh:
+            fh.seek(pos)
+            chunk = fh.read()
+            pos = fh.tell()
+        for line in chunk.splitlines():
+            line = line.strip()
+            if line.startswith("# "):
+                skipped += 1
+            elif line and os.path.sep in line and os.path.isfile(line):
+                files.append(line)
+        with JOBS_LOCK:
+            job.update(done_count=len(files), skipped=skipped,
+                       stage=f"جارٍ التنزيل بالمحرك الثاني · {len(files)} ملف" + (f" (تُخطّي {skipped})" if skipped else ""))
+            if files:
+                job["file"] = files[-1]
+                job["title"] = Path(files[0]).parent.name or job["title"]
+    try:
+        while proc.poll() is None:
+            if job.get("cancel"):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
+                raise Cancelled()
+            read_new()
+            time.sleep(0.4)
+        read_new()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    errors = []
+    if logf.exists():
+        for line in logf.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "][error]" in line or "][warning] Unable" in line:
+                errors.append(re.sub(r"^\[[^\]]*\]\[(error|warning)\]\s*", "", line.strip())[:300])
+    for f in (out, logf):
+        f.unlink(missing_ok=True)
+    with JOBS_LOCK:
+        job["errors"] = errors[-5:]
+        if errors:
+            job["failed"] = len(errors)
+    if not files and not skipped:
+        with JOBS_LOCK:
+            job["errors"] = (errors or ["لم يُعثر على ملفات في هذا الرابط."])[-5:]
+        return 1
+    if files:
+        folder = str(Path(files[0]).parent)
+        entry = {"key": None, "id": None, "title": Path(folder).name, "url": url, "file": files[0],
+                 "quality": f"معرض · {len(files)} ملف", "size": sum(os.path.getsize(f) for f in files if os.path.exists(f)),
+                 "date": time.time(), "uploader": None, "duration": None, "site": gallery_site(url) or site_of(url),
+                 "source": job.get("source_label") or "", "clip": "", "method": job.get("method_now") or "gallery-dl"}
+        with HISTORY_LOCK:
+            HISTORY.append(entry)
+            append_line(HISTORY_FILE, json.dumps(entry, ensure_ascii=False))
+        with JOBS_LOCK:
+            job["outdir"] = folder
+    return 0 if proc.returncode == 0 or files else proc.returncode
+
+
+# ---------------------------------------------------------------- live recording: stop and keep what was recorded
+LIVE_PROCS = {}  # job thread -> the ffmpeg process recording a live stream
+
+
+def _install_live_stop():
+    """yt-dlp records most live streams with ffmpeg; remember that process so 'stop' can ask ffmpeg to finish
+    the file properly (it then stays playable) instead of killing it."""
+    from yt_dlp.downloader import external as ext_mod
+    base = ext_mod.Popen
+
+    class TrackedPopen(base):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            LIVE_PROCS[threading.get_ident()] = self
+
+        def __exit__(self, *exc):
+            if LIVE_PROCS.get(threading.get_ident()) is self:
+                LIVE_PROCS.pop(threading.get_ident(), None)
+            return super().__exit__(*exc)
+    ext_mod.Popen = TrackedPopen
+
+
+def stop_live(job):
+    job["stop_live"] = True
+    proc = LIVE_PROCS.get(job.get("_thread"))
+    if proc and proc.poll() is None and proc.stdin:
+        try:
+            proc.stdin.write(b"q")
+            proc.stdin.flush()
+            job["_stop_sent"] = True  # ffmpeg finishes the file itself; yt-dlp then saves it normally
+            return True
+        except Exception as e:  # noqa: BLE001
+            log(f"[live] could not ask ffmpeg to stop: {e}")
+    return False
+
+
+def next_step(job, req, flags, failed_text, empty, alts):
+    """Decide the next way to try after a failure. Order: without the accelerator, as a real browser, with the
+    user's login, the gallery engine, a stream caught on the page, through the proxy."""
+    url = req["url"]
+    kind = req.get("kind")
+    if job.get("done_count") and not job.get("many"):
+        return None, None, None  # something already came out: report the rest as notes, don't start over
+    if "_no_accel" not in flags and aria2_failed(failed_text):
+        return "_no_accel", True, "تعذّر التسريع على هذا الجهاز — إكمال التنزيل بالطريقة العادية…"
+    if kind != "gallery" and "_impersonate" not in flags and IMPERSONATE and is_block_error(failed_text):
+        return "_impersonate", True, "الموقع رفض الاتصال — إعادة المحاولة بانتحال بصمة متصفح حقيقي…"
+    if "_use_cookies" not in flags and is_auth_error(failed_text) and ext_cookies_for(url):
+        return "_use_cookies", True, "الموقع يطلب تسجيل الدخول — إعادة المحاولة بكوكيز المتصفح…"
+    if (kind not in ("file", "gallery") and "_gallery" not in flags and not flags.get("_alt_stream")
+            and (empty or is_no_media(failed_text) or is_block_error(failed_text)) and gallery_site(url)):
+        return "_gallery", True, "لا يوجد فيديو يفهمه المحرك الأول — المحاولة بالمحرك الثاني (gallery-dl)…"
+    if kind not in ("file",) and alts:
+        return "_alt_stream", alts.pop(0), "إعادة المحاولة بالبث الذي التُقط من الصفحة…"
+    if "_use_proxy" not in flags and proxy_fallback_on() and is_network_error(failed_text):
+        return "_use_proxy", True, "فشل الاتصال المباشر — إعادة المحاولة عبر البروكسي…"
+    return None, None, None
+
+
 def run_job(job_id):
     job = JOBS[job_id]
     req = job["_req"]
@@ -1121,6 +1476,9 @@ def run_job(job_id):
 
     def progress_hook(d):
         check_cancel()
+        if job.get("stop_live") and not job.get("_stop_sent") and threading.get_ident() == job.get("_thread"):
+            job["_stop_sent"] = True
+            raise KeyboardInterrupt  # yt-dlp keeps the fragments it has for live streams and finishes the file
         info = d.get("info_dict") or {}
         with JOBS_LOCK:
             if info.get("title"):
@@ -1130,7 +1488,8 @@ def run_job(job_id):
             if d["status"] == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate")
                 done = d.get("downloaded_bytes") or 0
-                job.update(status="downloading", stage="جارٍ التنزيل", downloaded=done, total=total,
+                job.update(status="downloading", stage="جارٍ تسجيل البث المباشر" if job.get("live") else "جارٍ التنزيل",
+                           downloaded=done, total=total,
                            speed=d.get("speed"), eta=d.get("eta"),
                            percent=(done / total * 100) if total else None)
             elif d["status"] == "finished":
@@ -1150,15 +1509,29 @@ def run_job(job_id):
 
     try:
         flags, crash, code = {}, None, 0
-        for attempt in range(3):
-            attempt_req = {**req, **flags}
+        job["_thread"] = threading.get_ident()
+        attempts = job.setdefault("attempts", [])
+        alts = [a for a in (req.get("alt_streams") or []) if a.get("url") and a["url"] != req["url"]][:3]
+        if req.get("live"):
+            with JOBS_LOCK:
+                job.update(status="downloading", percent=None,
+                           stage="جارٍ تسجيل البث المباشر…" if req["live"] == "now" else "جارٍ تسجيل البث من بدايته…")
+        for attempt in range(8):
+            attempt_req = {**req, **{k: v for k, v in flags.items() if k != "_alt_stream"}}
+            if flags.get("_alt_stream"):
+                a = flags["_alt_stream"]
+                attempt_req.update(url=a["url"], headers={**(req.get("headers") or {}), **(a.get("headers") or {})},
+                                   name=req.get("title") or a.get("title") or "video", playlist=False, kind="media")
             if flags and job.get("many"):
                 attempt_req["skip"] = True  # only what failed; finished items are in the archive
             logger = JobLogger(job)
             crash = None
+            job["method_now"] = method_label(flags)
             try:
                 if req.get("kind") == "file":
                     code = run_file_job(job, attempt_req, flags)
+                elif req.get("kind") == "gallery" or flags.get("_gallery"):
+                    code = run_gallery_job(job, attempt_req, flags)
                 else:
                     opts = build_download_opts(attempt_req, job, logger)
                     opts["progress_hooks"] = [progress_hook]
@@ -1168,27 +1541,39 @@ def run_job(job_id):
                         code = ydl.download([attempt_req["url"]])
             except Cancelled:
                 raise
+            except KeyboardInterrupt:
+                if not job.get("stop_live"):
+                    raise
+                code = 0  # live recording stopped by the user
             except Exception as e:  # noqa: BLE001
                 if job.get("cancel") or "Cancelled" in type(e).__name__:
                     raise Cancelled() from e
                 code, crash = 1, e
-            if not code and not job.get("failed"):
+            # finished without error but nothing came out (e.g. a page with no media): treat as a failure
+            empty = (not code and not crash and not job.get("failed") and not job.get("done_count")
+                     and not job.get("skipped") and not req.get("sub_id") and not job.get("stop_live")
+                     and req.get("kind") != "file")
+            if not code and not job.get("failed") and not empty:
                 break
-            failed_text = " ".join(job.get("errors") or []) + " " + str(crash or "")
-            if "_no_accel" not in flags and aria2_failed(failed_text):
-                flags["_no_accel"] = True
-                stage = "تعذّر التسريع على هذا الجهاز — إكمال التنزيل بالطريقة العادية…"
-            elif "_use_cookies" not in flags and is_auth_error(failed_text) and ext_cookies_for(req["url"]):
-                flags["_use_cookies"] = True
-                stage = "الموقع يطلب تسجيل الدخول — إعادة المحاولة بكوكيز المتصفح…"
-            elif "_use_proxy" not in flags and proxy_fallback_on() and is_network_error(failed_text):
-                flags["_use_proxy"] = True
-                stage = "فشل الاتصال المباشر — إعادة المحاولة عبر البروكسي…"
-            else:
+            failed_text = " ".join(job.get("errors") or []) + " " + str(crash or "") + (" no media found" if empty else "")
+            attempts.append({"method": job["method_now"], "error": ANSI.sub("", failed_text).strip()[:300]})
+            if job.get("stop_live"):
                 break
+            key, val, stage = next_step(job, req, flags, failed_text, empty, alts)
+            if not key:
+                if empty:
+                    code = 1
+                    with JOBS_LOCK:
+                        job["errors"] = ["لم يُعثر على فيديو أو ملفات في هذا الرابط."]
+                break
+            if key == "_alt_stream":
+                flags.pop("_gallery", None)
+            flags[key] = val
             log(f"[retry] job {job_id}: {stage}")
             with JOBS_LOCK:
-                job.update(status="starting", stage=stage, failed=0, errors=[], percent=0, speed=None, eta=None)
+                job.update(status="starting", stage=stage, failed=0, errors=[], percent=0, speed=None, eta=None,
+                           done_count=0, skipped=0)
+        job["method"] = method_label(flags)
         if flags.get("_use_proxy") or (proxy_value() and SETTINGS.get("proxy_mode") == "always"):
             job["via_proxy"] = True
         if flags.get("_use_cookies"):
@@ -1208,6 +1593,8 @@ def run_job(job_id):
             elif not n and sk:
                 job.update(status="done", stage="لا جديد — كل العناصر نُزّلت سابقاً" if many else "نُزّل سابقاً — تم التخطّي",
                            percent=100, speed=None, eta=None)
+            elif job.get("stop_live"):
+                job.update(status="done", stage="أُوقف التسجيل وحُفظ ✓", percent=100, speed=None, eta=None)
             else:
                 job.update(status="done", stage="اكتمل ✓", percent=100, speed=None, eta=None)
     except Cancelled:
@@ -1740,6 +2127,75 @@ def run_window(url, hidden):
     return True
 
 
+SITES_CACHE = {}
+
+
+def supported_sites():
+    if "list" in SITES_CACHE:
+        return SITES_CACHE["list"]
+    out = []
+    for ie in yt_dlp.extractor.gen_extractor_classes():
+        try:
+            name, desc = ie.IE_NAME, getattr(ie, "IE_DESC", None)
+            if name == "generic" or desc is False:
+                continue
+            out.append({"n": name, "d": desc or "", "e": "yt-dlp", "w": bool(ie.working())})
+        except Exception:  # noqa: BLE001
+            continue
+    if gallery_dl:
+        cats = {}
+        for ex in gallery_dl.extractor.extractors():
+            c = getattr(ex, "category", "")
+            if not c or c in ("generic", "directlink", "recursive", "oauth", "test", "noop", "ytdl"):
+                continue
+            cats.setdefault(c, set()).add(getattr(ex, "subcategory", "") or "")
+        for c, subs in sorted(cats.items()):
+            out.append({"n": c, "d": "، ".join(sorted(x for x in subs if x))[:140], "e": "gallery-dl", "w": True})
+    SITES_CACHE["list"] = out
+    return out
+
+
+def test_url(req):
+    url = str(req.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("ضع رابطاً يبدأ بـ http أو https.")
+    yie = None
+    for ie in yt_dlp.extractor.gen_extractor_classes():
+        try:
+            if ie.IE_NAME != "generic" and ie.suitable(url):
+                yie = ie.IE_NAME
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    res = {"url": url, "ytdlp": yie, "gallery": gallery_site(url), "probe": None, "error": None}
+    try:
+        info = get_info({"url": url, "playlist": False})
+        n = sum(len(v) for v in (info.get("formats") or {}).values())
+        res["probe"] = {"type": info.get("type"), "title": info.get("title"), "method": info.get("method"),
+                        "formats": n, "count": info.get("count"), "live": info.get("live_status")}
+    except Exception as e:  # noqa: BLE001
+        res["error"] = clean_err(e)
+    return res
+
+
+def job_report(job):
+    lines = [f"MO Downloader {APP_VERSION} — {SYSTEM} {platform.release()} {platform.machine()}"
+             + (" (standalone)" if FROZEN else " (Python)"),
+             f"yt-dlp {ENGINE['version']} · gallery-dl {ENGINE.get('gallery') or '-'} · "
+             f"impersonation {'yes' if IMPERSONATE else 'no'} · ffmpeg {'yes' if FFMPEG else 'no'} · "
+             f"accelerator {'yes' if ARIA2C and not ARIA2_BROKEN['why'] else 'no'}",
+             f"link: {redact_url(job.get('url'))}",
+             f"label: {job.get('label') or '-'} · source: {job.get('source') or '-'}",
+             f"result: {job.get('status')} — {job.get('stage')}", "attempts:"]
+    for a in job.get("attempts") or []:
+        lines.append(f"  - {a.get('method')}: {redact_text(a.get('error'))}")
+    if not job.get("attempts"):
+        lines.append("  - (none recorded)")
+    lines += ["error:", redact_text(job.get("error") or "-").strip()]
+    # never include cookies, headers or full query strings
+    return "\n".join(lines)
+
+
 def public_job(j):
     return {k: v for k, v in j.items() if not k.startswith("_")}
 
@@ -1785,12 +2241,17 @@ def ext_download(req):
         store_ext_cookies(url, req["cookies"])
     if req.get("page_cookies") and page:
         store_ext_cookies(page, req["page_cookies"])
-    headers = {}
+    headers = clean_headers(req.get("headers"))
     if req.get("referer"):
-        headers["Referer"] = str(req["referer"])[:2000]
+        headers.setdefault("Referer", str(req["referer"])[:2000])
     if req.get("ua"):
-        headers["User-Agent"] = str(req["ua"])[:500]
+        headers.setdefault("User-Agent", str(req["ua"])[:500])
     title = (req.get("title") or url)[:200]
+    alts = []
+    for a in (req.get("alt_streams") or [])[:5]:
+        au = str((a or {}).get("url") or "")
+        if au.startswith(("http://", "https://")):
+            alts.append({"url": au, "headers": clean_headers(a.get("headers")), "title": str(a.get("title") or "")[:200]})
     if kind == "file":
         r = {"url": url, "kind": "file", "headers": headers, "filename": req.get("filename") or "",
              "outdir": SETTINGS["outdir"], "title": req.get("filename") or title, "page": page}
@@ -1802,7 +2263,7 @@ def ext_download(req):
         "url": url, "mode": "preset", "preset": preset, "container": "mp4",
         "audio_convert": "mp3" if preset == "audio" else "original", "audio_quality": "0",
         "outdir": SETTINGS["outdir"], "meta": True, "title": title, "headers": headers,
-        "playlist": "youtube.com/playlist" in url,
+        "playlist": "youtube.com/playlist" in url, "alt_streams": alts,
     }
     if kind == "media":
         r["name"] = req.get("title") or "video"
@@ -1811,8 +2272,34 @@ def ext_download(req):
     return {"id": new_job(r, label=lab, source="ext", source_label="من المتصفح")}
 
 
+def clean_headers(h):
+    """Request headers the extension saw for a stream; cookies travel separately, hop-by-hop ones are dropped."""
+    out = {}
+    for k, v in (h or {}).items() if isinstance(h, dict) else []:
+        k, v = str(k)[:100], str(v)[:4000]
+        low = k.lower()
+        if low in ("cookie", "host", "content-length", "connection", "accept-encoding", "range", "if-range",
+                   "if-none-match", "if-modified-since", "upgrade-insecure-requests", "priority") or low.startswith(("sec-", ":")):
+            continue
+        out[k] = v
+    return out
+
+
+def ext_formats(b):
+    url = str(b.get("url") or "").strip()
+    if b.get("cookies"):
+        store_ext_cookies(url, b["cookies"])
+    info = get_info({"url": url, "headers": clean_headers(b.get("headers")), "playlist": False})
+    if info.get("type") != "video":
+        return {"type": info.get("type"), "heights": [], "audio": False, "title": info.get("title")}
+    f = info["formats"]
+    hs = sorted({x["height"] for k in ("av", "video") for x in f[k] if x.get("height")}, reverse=True)
+    return {"type": "video", "title": info.get("title"), "heights": hs[:8], "audio": bool(f["audio"] or f["av"]),
+            "duration": info.get("duration"), "method": info.get("method")}
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MODownloader/2.4"
+    server_version = "MODownloader/2.5"
 
     def log_message(self, *_):
         pass
@@ -1884,6 +2371,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_ext(200, {"jobs": [{k: j.get(k) for k in keep} for j in jobs]})
             if method == "POST" and u.path == "/api/ext/download":
                 return self._send_ext(200, ext_download(self._body()))
+            if method == "POST" and u.path == "/api/ext/formats":
+                return self._send_ext(200, ext_formats(self._body()))
             if method == "POST" and u.path == "/api/ext/cookies":
                 b = self._body()
                 store_ext_cookies(str(b.get("url") or ""), b.get("cookies"))
@@ -1932,7 +2421,12 @@ class Handler(BaseHTTPRequestHandler):
                 "settings": {k: v for k, v in SETTINGS.items() if k != "engine_checked"},
                 "system": SYSTEM, "has_extension": bool(extension_source()), "aria2": bool(ARIA2C),
                 "aria2_broken": ARIA2_BROKEN["why"], "in_window": bool(UI["win"]),
+                "gallery": ENGINE.get("gallery"), "impersonate": IMPERSONATE,
+                "engine": {"channel": SETTINGS.get("engine_channel", "stable"), "updating": ENGINE["updating"],
+                           "msg": ENGINE["msg"], "pending": ENGINE["pending"]},
             })
+        if u.path == "/api/sites":
+            return self._send(200, {"sites": supported_sites()})
         if u.path == "/api/history":
             return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 300)))
         if u.path == "/api/subs":
@@ -1968,6 +2462,26 @@ class Handler(BaseHTTPRequestHandler):
                         if j["status"] in ("queued", PAUSED):
                             j.update(status="cancelled", stage="أُلغي")
                 return self._send(200, {"ok": True})
+            if p == "/api/engine_update":
+                if "channel" in req and req["channel"] in ("stable", "nightly"):
+                    SETTINGS["engine_channel"] = req["channel"]
+                    save_settings()
+                threading.Thread(target=engine_update_check, kwargs={"force": True}, daemon=True).start()
+                return self._send(200, {"ok": True})
+            if p == "/api/test_url":
+                return self._send(200, test_url(req))
+            if p == "/api/report":
+                with JOBS_LOCK:
+                    j = JOBS.get(req.get("id"))
+                if not j:
+                    raise ValueError("المهمة غير موجودة.")
+                return self._send(200, {"text": job_report(j)})
+            if p == "/api/stop_live":
+                with JOBS_LOCK:
+                    j = JOBS.get(req.get("id"))
+                if not j:
+                    raise ValueError("المهمة غير موجودة.")
+                return self._send(200, {"ok": True, "ffmpeg": stop_live(j)})
             if p == "/api/pause":
                 with QUEUE:
                     j = JOBS.get(req.get("id"))
@@ -2058,6 +2572,8 @@ class Handler(BaseHTTPRequestHandler):
                     changed["ext_cookies"] = req["ext_cookies"]
                 if req.get("ui") in ("window", "browser"):
                     changed["ui"] = req["ui"]
+                if req.get("engine_channel") in ("stable", "nightly"):
+                    changed["engine_channel"] = req["engine_channel"]
                 SETTINGS.update(changed)
                 save_settings()
                 if "autostart" in req:
@@ -2135,6 +2651,10 @@ def main():
         _install_aria2_downloader()
     except Exception as e:  # noqa: BLE001
         log(f"[aria2] progress hook not installed: {e}")
+    try:
+        _install_live_stop()
+    except Exception as e:  # noqa: BLE001
+        log(f"[live] stop hook not installed: {e}")
     Path(SETTINGS["outdir"]).mkdir(parents=True, exist_ok=True)
     running_port = already_running(DEFAULT_PORT)
     if running_port:
@@ -2160,6 +2680,7 @@ def main():
     print(f"  MO Downloader {APP_VERSION} is running:  {url}")
     print(f"  yt-dlp {ENGINE['version']} | ffmpeg: {'OK' if FFMPEG else 'MISSING'}"
           f" | JS runtime: {', '.join(JS_RUNTIMES) or 'MISSING'} | aria2: {'OK' if ARIA2C else 'no'}")
+    print(f"  gallery-dl {ENGINE.get('gallery') or 'MISSING'} | impersonation: {'OK' if IMPERSONATE else 'no'}")
     if FROZEN:
         print(f"  engine: {Path(yt_dlp.__file__).parent}")
     print(f"  Downloads folder: {SETTINGS['outdir']}")
@@ -2322,6 +2843,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     <button data-p="batch">عدة روابط</button>
     <button data-p="subs">متابعة القنوات <span class="n" id="n-subs">0</span></button>
     <button data-p="hist">السجل <span class="n" id="n-hist">0</span></button>
+    <button data-p="sites">المواقع المدعومة</button>
     <button data-p="settings">الإعدادات</button>
   </nav>
 
@@ -2354,6 +2876,15 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         </div>
       </div>
       <div id="prev" class="msg warn hidden"></div>
+      <div id="livebox" class="clip hidden" style="border-color:var(--bad)">
+        <b>🔴 <span id="liveTitle">هذا بث مباشر</span></b>
+        <div class="row" style="margin-top:10px">
+          <label class="toggle"><input type="radio" name="liveMode" value="now" checked> سجّل من الآن</label>
+          <label class="toggle"><input type="radio" name="liveMode" value="start"> سجّل من بداية البث (إن أتاحه الموقع)</label>
+          <button class="primary" id="liveGo">⏺ تسجيل البث</button>
+        </div>
+        <div class="help">يستمر التسجيل حتى ينتهي البث أو تضغط «⏹ إيقاف التسجيل وحفظه» في قائمة التنزيلات، ويُحفظ ما سُجّل.</div>
+      </div>
 
       <div class="tabs" id="tabs">
         <button class="tab" data-k="av">فيديو بصوت <span class="n" id="n-av">0</span></button>
@@ -2401,6 +2932,14 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <div class="pick" id="pick">اختر جودة من الجدول</div>
         <button class="primary" id="download" disabled>تنزيل</button>
       </div>
+    </section>
+
+    <section class="card hidden" id="galresult">
+      <h2>🖼️ <span id="galtitle"></span></h2>
+      <p class="sub">هذا الرابط معرض أو منشور فيه صور أو ملفات متعددة، وسيُنزَّل بالمحرك الثاني
+        (<span class="ltr">gallery-dl</span>) مع الحفاظ على أسماء الملفات وترتيبها.</p>
+      <div class="opts"><div class="opt"><label>مجلد الحفظ</label><input type="text" id="galoutdir" class="ltr"></div></div>
+      <div class="go"><div class="pick" id="galhint"></div><button class="primary" id="galgo">تنزيل كل الملفات</button></div>
     </section>
 
     <section class="card hidden" id="plresult">
@@ -2490,6 +3029,26 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     </section>
   </div>
 
+  <!-- ============ supported sites ============ -->
+  <div class="panel hidden" id="p-sites">
+    <section class="card">
+      <h2>اختبر رابطاً</h2>
+      <p class="sub">يعرض أي محرك يدعم الرابط، والطريقة التي نجحت في قراءته، قبل أن تنزّل.</p>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="turl" class="grow ltr" placeholder="https://..." spellcheck="false">
+        <button class="primary" id="tgo">اختبر هذا الرابط</button>
+      </div>
+      <div id="tres" class="msg hidden"></div>
+    </section>
+    <section class="card">
+      <div class="section-h"><h3>المواقع المدعومة <span class="badge" id="scount"></span></h3></div>
+      <input type="text" id="sq" placeholder="ابحث باسم الموقع… (مثل instagram أو tiktok أو vimeo)" style="width:100%">
+      <p class="help">المحرك الأول (<span class="ltr">yt-dlp</span>) للفيديو والصوت، والثاني (<span class="ltr">gallery-dl</span>) للصور والمعارض.
+        والمواقع غير الموجودة في القائمة كثيراً ما تعمل أيضاً عن طريق البحث العام في الصفحة، أو التقاط البث من إضافة المتصفح.</p>
+      <div class="list" id="slist2"></div>
+    </section>
+  </div>
+
   <!-- ============ settings ============ -->
   <div class="panel hidden" id="p-settings">
     <section class="card settings">
@@ -2544,6 +3103,20 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       </div>
       <div id="cookiehelp" class="msg info">لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.</div>
       <div id="cmsg" class="msg hidden"></div>
+    </section>
+
+    <section class="card">
+      <h2>محرك التنزيل</h2>
+      <p class="sub" id="engVers"></p>
+      <div class="opts">
+        <div class="opt"><label>قناة التحديث</label>
+          <select id="engChan">
+            <option value="stable">مستقرة (موصى به)</option>
+            <option value="nightly">يومية — إصلاحات المواقع تصل إليها أولاً</option>
+          </select></div>
+      </div>
+      <div class="go"><span class="pick" id="engMsg"></span><button class="primary" id="engNow">تحديث المحرك الآن</button></div>
+      <p class="help">إذا توقف موقع عن العمل فجأة، فغالباً غيّر نظامه: حدّث المحرك ثم أعد تشغيل البرنامج. وإن لم يُحل، جرّب القناة اليومية.</p>
     </section>
 
     <section class="card">
@@ -2707,6 +3280,7 @@ function showPanel(p) {
   store.set("md_panel", p);
   if (p === "hist") loadHistory();
   if (p === "subs") loadSubs();
+  if (p === "sites") loadSites();
 }
 document.querySelectorAll("#nav button").forEach(b => b.onclick = () => showPanel(b.dataset.p));
 
@@ -2717,6 +3291,7 @@ async function loadStatus() {
     const box = $("status"); box.textContent = "";
     box.append(el("span", {class: "pill ok", text: "yt-dlp " + s.ytdlp}));
     if (s.pending) box.append(el("span", {class: "pill warn", text: "تحديث المحرك جاهز — أعد تشغيل الأداة"}));
+    if (s.gallery) box.append(el("span", {class: "pill ok", text: "محركان ✓"}));
     box.append(el("span", {class: "pill " + (s.ffmpeg ? "ok" : "bad"), text: s.ffmpeg ? "ffmpeg ✓" : "ffmpeg غير موجود"}));
     if (s.aria2 && s.settings.accel !== false && !s.aria2_broken) box.append(el("span", {class: "pill ok", text: "تسريع ✓"}));
     if (s.aria2_broken) box.append(el("span", {class: "pill warn", text: "التسريع متوقف على هذا الجهاز"}));
@@ -2730,6 +3305,16 @@ async function loadStatus() {
     $("setConns").value = String([4, 8, 16].includes(+s.settings.accel_conns) ? +s.settings.accel_conns : 8);
     $("setExtCk").value = s.settings.ext_cookies || "auto";
     $("setUi").value = s.settings.ui || "window";
+    $("galoutdir").value = $("galoutdir").value || s.settings.outdir;
+    const eng = s.engine || {};
+    $("engChan").value = eng.channel || "stable";
+    $("engVers").textContent = "";
+    $("engVers").append("المحرك الأول ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
+      " · المحرك الثاني ", el("span", {class: "ltr", text: "gallery-dl " + (s.gallery || "غير متوفر")}),
+      " · انتحال بصمة المتصفح: " + (s.impersonate ? "متاح ✓" : "غير متاح"));
+    $("engMsg").textContent = eng.updating ? "جارٍ التحديث…" : (eng.msg || "");
+    $("engNow").disabled = !!eng.updating;
+    if (eng.updating) setTimeout(loadStatus, 2000);
     $("accelHelp").textContent = s.aria2
       ? "التسريع يقسم الملف إلى أجزاء تُحمَّل معاً، ويتيح الإيقاف المؤقت والاستئناف من نفس النقطة. لا يعمل مع بروكسي socks5."
       : "أداة التسريع (aria2) غير متوفرة في هذه النسخة، فتعمل التنزيلات باتصال واحد.";
@@ -2779,15 +3364,30 @@ async function analyze() {
   const url = $("url").value.trim();
   if (!url) { showMsg("msg", "الصق رابطاً أولاً."); return; }
   S.url = url; $("analyze").disabled = true;
-  $("result").classList.add("hidden"); $("plresult").classList.add("hidden");
+  $("result").classList.add("hidden"); $("plresult").classList.add("hidden"); $("galresult").classList.add("hidden");
   showMsg("msg", "جارٍ قراءة الصفحة واستخراج كل الجودات…", "loading");
   try {
     const info = await api("/api/info", { url, playlist: $("playlist").checked });
-    S.info = info; showMsg("msg", info.via_proxy ? "تعذّر الاتصال المباشر بالموقع، فتم الوصول إليه عبر البروكسي." : "", "info");
-    if (info.type === "playlist") renderPlaylist(info); else renderVideo(info);
+    S.info = info;
+    showMsg("msg", info.method && info.method !== "مباشر" ? "قُرئ الرابط بطريقة: " + info.method : "", "info");
+    if (info.type === "playlist") renderPlaylist(info);
+    else if (info.type === "gallery") renderGallery(info);
+    else renderVideo(info);
   } catch (e) { showMsg("msg", e.message); }
   finally { $("analyze").disabled = false; }
 }
+function renderGallery(info) {
+  $("galresult").classList.remove("hidden");
+  $("galtitle").textContent = info.site + " — " + info.url;
+  if (!$("galoutdir").value) $("galoutdir").value = S.settings.outdir || "";
+  $("galhint").textContent = "يُنشأ مجلد باسم الموقع داخل مجلد الحفظ.";
+}
+$("galgo").onclick = async () => {
+  try {
+    await api("/api/download", { url: S.url, kind: "gallery", outdir: $("galoutdir").value.trim(), title: S.info.site, label: "معرض · gallery-dl" });
+    poll(); flash($("galgo"));
+  } catch (e) { showMsg("msg", e.message); }
+};
 function renderVideo(info) {
   $("result").classList.remove("hidden");
   const th = $("thumb");
@@ -2799,6 +3399,9 @@ function renderVideo(info) {
   if (info.duration) row.append(el("span", {text: "⏱ " + fmtDur(info.duration)}));
   if (info.site) row.append(el("span", {text: "🌐 " + info.site}));
   if (info.is_live) row.append(el("span", {text: "🔴 بث مباشر"}));
+  const live = info.is_live || info.live_status === "is_upcoming";
+  $("livebox").classList.toggle("hidden", !live);
+  $("liveTitle").textContent = info.live_status === "is_upcoming" ? "بث لم يبدأ بعد — ستنتظر الأداة بدايته ثم تسجّله" : "هذا بث مباشر";
   const pv = $("prev");
   if (info.previous) {
     pv.textContent = ""; pv.classList.remove("hidden");
@@ -2934,6 +3537,72 @@ async function downloadPlaylist() {
   } catch (e) { showMsg("msg", e.message); }
 }
 
+$("liveGo").onclick = async () => {
+  const mode = document.querySelector("input[name=liveMode]:checked").value;
+  try {
+    await api("/api/download", { ...singleOpts(), mode: "preset", preset: "best", live: mode, clip_start: "", clip_end: "",
+      label: mode === "start" ? "بث مباشر · من البداية" : "بث مباشر · من الآن" });
+    poll(); flash($("liveGo"));
+  } catch (e) { showMsg("msg", e.message); }
+};
+
+// ---------- supported sites + link tester
+let SITES = null;
+async function loadSites() {
+  if (!SITES) {
+    $("slist2").textContent = ""; $("slist2").append(el("p", {class: "empty", text: "جارٍ تحميل القائمة…"}));
+    try { SITES = (await api("/api/sites")).sites; } catch (e) { $("slist2").textContent = e.message; return; }
+  }
+  const q = $("sq").value.trim().toLowerCase();
+  const hits = q ? SITES.filter(x => (x.n + " " + x.d).toLowerCase().includes(q)) : SITES;
+  const yt = SITES.filter(x => x.e === "yt-dlp").length, gd = SITES.length - yt;
+  $("scount").textContent = (q ? hits.length + " من " : "") + SITES.length + " (" + yt + " فيديو · " + gd + " صور ومعارض)";
+  const box = $("slist2"); box.textContent = "";
+  for (const x of hits.slice(0, 300)) {
+    box.append(el("div", {class: "item" + (x.w ? "" : " off")}, el("div", {class: "body"},
+      el("div", {class: "t ltr", style: "text-align:left", text: x.n}),
+      el("div", {class: "s"}, el("span", {class: "badge" + (x.e === "gallery-dl" ? "" : " ok"), text: x.e}),
+        x.d ? el("span", {class: "ltr", text: x.d}) : null, x.w ? null : el("span", {text: "معطّل حالياً في المحرك"})))));
+  }
+  if (hits.length > 300) box.append(el("p", {class: "help", text: "يُعرض أول 300 نتيجة — اكتب اسماً أدق."}));
+  if (!hits.length) box.append(el("p", {class: "empty", text: "لا يوجد في القائمة — جرّب «اختبر هذا الرابط» فكثير من المواقع تعمل بالبحث العام."}));
+}
+let sTimer = null;
+$("sq").addEventListener("input", () => { clearTimeout(sTimer); sTimer = setTimeout(loadSites, 200); });
+$("tgo").onclick = async () => {
+  const url = $("turl").value.trim(); if (!url) return;
+  $("tgo").disabled = true; showMsg("tres", "جارٍ اختبار الرابط…", "loading");
+  try {
+    const r = await api("/api/test_url", { url });
+    const lines = [];
+    lines.push("المحرك الأول (yt-dlp): " + (r.ytdlp ? "يدعمه باسم «" + r.ytdlp + "»" : "لا يوجد دعم خاص — يُجرَّب البحث العام في الصفحة"));
+    lines.push("المحرك الثاني (gallery-dl): " + (r.gallery ? "يدعمه باسم «" + r.gallery + "»" : "لا يدعمه"));
+    if (r.probe) {
+      const t = {video: "فيديو", playlist: "قائمة", gallery: "معرض صور/ملفات"}[r.probe.type] || r.probe.type;
+      lines.push("✓ النتيجة: " + t + (r.probe.title ? " — " + r.probe.title : "") +
+        (r.probe.formats ? " · " + r.probe.formats + " جودة" : "") + (r.probe.count ? " · " + r.probe.count + " عنصر" : ""));
+      lines.push("الطريقة التي نجحت: " + (r.probe.method || "مباشر"));
+    } else lines.push("✗ تعذّرت القراءة:\n" + r.error);
+    showMsg("tres", lines.join("\n"), r.probe ? "ok" : "err");
+  } catch (e) { showMsg("tres", e.message); }
+  finally { $("tgo").disabled = false; }
+};
+
+// ---------- engine
+$("engNow").onclick = async () => {
+  try { await api("/api/engine_update", { channel: $("engChan").value }); $("engMsg").textContent = "جارٍ التحقق…"; setTimeout(loadStatus, 1500); }
+  catch (e) { $("engMsg").textContent = e.message; }
+};
+$("engChan").onchange = () => api("/api/settings", { engine_channel: $("engChan").value }).then(loadStatus);
+
+// ---------- copy helper (works in the app window too)
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) {}
+  const ta = el("textarea", {style: "position:fixed;top:-1000px"}); ta.value = t; document.body.append(ta); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch (e) {}
+  ta.remove(); return ok;
+}
+
 // ---------- batch
 function batchUrls() { return [...new Set(($("burls").value.match(/https?:\/\/[^\s<>"']+/g) || []))]; }
 $("burls").addEventListener("input", () => {
@@ -3061,8 +3730,10 @@ function renderJobs(jobs) {
     s.append(el("span", {text: j.stage || ""}));
     if (j.label) s.append(el("span", {class: "badge", text: j.label}));
     if (j.clip) s.append(el("span", {text: "✂ " + j.clip}));
-    if (j.via_proxy) s.append(el("span", {class: "badge", text: "عبر البروكسي"}));
-    if (j.via_cookies) s.append(el("span", {class: "badge", text: "بتسجيل دخولك"}));
+    if (j.method && j.method !== "مباشر" && j.status === "done") s.append(el("span", {class: "badge ok", text: "نجح بطريقة: " + j.method}));
+    else if (j.method_now && j.method_now !== "مباشر" && !["done", "error", "cancelled"].includes(j.status))
+      s.append(el("span", {class: "badge", text: j.method_now}));
+    if (j.gallery && j.done_count && j.status !== "done") s.append(el("span", {text: j.done_count + " ملف"}));
     if (j.many) {
       if (j.item) s.append(el("span", {text: "العنصر " + j.item}));
       if (j.done_count) s.append(el("span", {text: "نُزّل " + j.done_count}));
@@ -3079,15 +3750,28 @@ function renderJobs(jobs) {
     const bar = fin ? null : el("div", {class: "bar"}, el("i"));
     if (bar) bar.firstChild.style.width = (j.percent || 0) + "%";
     const acts = el("div", {class: "acts"});
-    if (["queued", "starting", "downloading", "processing"].includes(j.status) && !j.many)
+    const running = ["queued", "starting", "downloading", "processing"].includes(j.status);
+    if (running && j.live)
+      acts.append(el("button", {class: "small", text: "⏹ إيقاف التسجيل وحفظه", onclick: () => api("/api/stop_live", {id: j.id}).then(poll)}));
+    else if (running && !j.many && !j.gallery)
       acts.append(el("button", {class: "small", text: "⏸ إيقاف مؤقت", onclick: () => api("/api/pause", {id: j.id}).then(poll)}));
     if (j.status === "paused")
       acts.append(el("button", {class: "small", text: "▶ استئناف", onclick: () => api("/api/resume", {id: j.id}).then(poll)}));
     if (!["done", "error", "cancelled"].includes(j.status))
       acts.append(el("button", {class: "small", text: "إلغاء", onclick: () => api("/api/cancel", {id: j.id}).then(poll)}));
+    const folderOnly = j.many || j.gallery;
     if (j.status === "done" && (j.file || j.outdir))
-      acts.append(el("button", {class: "small", text: j.file && !j.many ? "إظهار الملف" : "فتح المجلد",
-        onclick: () => api("/api/open", {path: j.many ? j.outdir : (j.file || j.outdir), select: !!j.file && !j.many})}));
+      acts.append(el("button", {class: "small", text: j.file && !folderOnly ? "إظهار الملف" : "فتح المجلد",
+        onclick: () => api("/api/open", {path: folderOnly ? j.outdir : (j.file || j.outdir), select: !!j.file && !folderOnly})}));
+    if (j.status === "error" || (j.status === "done" && j.error)) {
+      const rb = el("button", {class: "small ghost", text: "نسخ تقرير الخطأ"});
+      rb.onclick = async () => {
+        try { const r = await api("/api/report", {id: j.id}); rb.textContent = (await copyText(r.text)) ? "✓ نُسخ" : "تعذّر النسخ"; }
+        catch (e) { rb.textContent = "تعذّر"; }
+        setTimeout(() => rb.textContent = "نسخ تقرير الخطأ", 2000);
+      };
+      acts.append(rb);
+    }
     if (j.status === "error" || j.status === "cancelled")
       acts.append(el("button", {class: "small", text: "إعادة المحاولة", onclick: () => api("/api/retry", {id: j.id}).then(poll)}));
     const title = j.many && j.current && j.status !== "done" ? j.title + " — " + j.current : j.title;

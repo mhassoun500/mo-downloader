@@ -44,7 +44,7 @@ def app_version():
 def main():
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet", "pip")
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet",
-        "pyinstaller", "yt-dlp[default]", "yt-dlp-ejs", "imageio-ffmpeg", "deno", "certifi", "pywebview")
+        "pyinstaller", "yt-dlp[default,curl-cffi]", "yt-dlp-ejs", "gallery-dl", "imageio-ffmpeg", "deno", "certifi", "pywebview")
     import importlib.metadata as md
     import deno as deno_pkg
     deno_bin = Path(deno_pkg.find_deno_bin())
@@ -63,7 +63,8 @@ def main():
         except Exception:
             ossl_legacy = None
     print("openssl legacy module:", ossl_legacy or "-")
-    versions = {"yt-dlp": md.version("yt-dlp"), "yt-dlp-ejs": md.version("yt-dlp-ejs"), "app": app_version()}
+    versions = {"yt-dlp": md.version("yt-dlp"), "yt-dlp-ejs": md.version("yt-dlp-ejs"),
+                "gallery-dl": md.version("gallery-dl"), "app": app_version()}
     print("engine:", versions)
 
     shutil.rmtree(WORK, ignore_errors=True)
@@ -77,6 +78,7 @@ def main():
         "--add-data", f"{WORK / 'engine_version.json'}{os.pathsep}.",
         "--add-data", f"{ROOT / 'browser-extension'}{os.pathsep}browser-extension",
         "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",
+        "--collect-all", "gallery_dl", "--collect-all", "curl_cffi",
         "--add-binary", f"{deno_bin}{os.pathsep}deno_bin",
         "--collect-data", "certifi", "--hidden-import", "certifi",
         "--hidden-import", "tkinter", "--hidden-import", "tkinter.filedialog",

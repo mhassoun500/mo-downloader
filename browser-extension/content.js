@@ -212,6 +212,56 @@
     else toast(id === "choose" ? "فُتحت صفحة اختيار الجودة ✓" : "✓ أُضيف إلى قائمة التنزيل في MO Downloader", "ok");
   }
 
+  // ---- report media this page points to: <video>/<source> files, og:video and JSON-LD links, embedded players
+  // (iframes) and direct media links. Players that build their stream in code are caught on the network side.
+  const reported = new Set();
+  const absUrl = (u) => { try { return new URL(u, location.href).href; } catch (e) { return null; } };
+  function kindOf(u) {
+    const p = String(u).split(/[?#]/)[0].toLowerCase();
+    if (/\.m3u8$/.test(p)) return "HLS";
+    if (/\.mpd$/.test(p)) return "DASH";
+    const m = p.match(/\.(mp4|webm|mkv|mov|m4v|mp3|m4a|ogg|flac|wav)$/);
+    return m ? m[1].toUpperCase() : null;
+  }
+  function scanMedia() {
+    const items = [];
+    const add = (u, kind) => {
+      u = u && absUrl(u);
+      if (!u || !/^https?:/.test(u) || reported.has(u) || u === location.href) return;
+      reported.add(u);
+      items.push({ url: u, kind });
+    };
+    for (const m of document.querySelectorAll("video, audio"))
+      for (const src of [m.currentSrc, m.src, ...[...m.querySelectorAll("source")].map((x) => x.src)])
+        if (src && /^https?:/.test(src)) add(src, kindOf(src) || "VIDEO");
+    for (const sel of ['meta[property="og:video"]', 'meta[property="og:video:url"]', 'meta[property="og:video:secure_url"]',
+                       'meta[name="twitter:player:stream"]']) {
+      const c = document.querySelector(sel);
+      if (c && c.content) add(c.content, kindOf(c.content) || "VIDEO");
+    }
+    const walk = (o, d) => {
+      if (!o || d > 6 || typeof o !== "object") return;
+      if (Array.isArray(o)) return o.forEach((x) => walk(x, d + 1));
+      if (typeof o.contentUrl === "string") add(o.contentUrl, kindOf(o.contentUrl) || "VIDEO");
+      if (typeof o.embedUrl === "string") add(o.embedUrl, "EMBED");
+      for (const k in o) if (o[k] && typeof o[k] === "object") walk(o[k], d + 1);
+    };
+    for (const sc of document.querySelectorAll('script[type="application/ld+json"]')) { try { walk(JSON.parse(sc.textContent), 0); } catch (e) {} }
+    for (const f of document.querySelectorAll("iframe[src]")) {
+      const r = f.getBoundingClientRect();
+      if (r.width >= 240 && r.height >= 135) add(f.src, "EMBED");
+    }
+    for (const a of document.querySelectorAll("a[href]")) { const k = kindOf(a.getAttribute("href") || ""); if (k) add(a.href, k); }
+    if (items.length) { try { ext.runtime.sendMessage({ type: "pageMedia", items: items.slice(0, 20), title: document.title }); } catch (e) {} }
+  }
+  setTimeout(scanMedia, 1500);
+  let scanTimer = null;
+  try {
+    new MutationObserver(() => { clearTimeout(scanTimer); scanTimer = setTimeout(scanMedia, 2000); })
+      .observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+  document.addEventListener("play", () => setTimeout(scanMedia, 800), true);
+
   ext.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === "toast" && window === window.top) {
       if (msg.error) toast(explain(msg.error), "err", 6000);

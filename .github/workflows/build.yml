@@ -116,6 +116,39 @@ jobs:
           if [ -f "$MO_SELFTEST" ]; then cat "$MO_SELFTEST"; else tail -40 ~/.media_downloader/log.txt; exit 1; fi
           grep -q "^OK" "$MO_SELFTEST" || { tail -40 ~/.media_downloader/log.txt; exit 1; }
 
+      - name: Check the bundled engines (yt-dlp, gallery-dl, browser impersonation)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then APP="build-tmp/dist/MO Downloader/MO Downloader.exe";
+          else APP="build-tmp/dist/MO Downloader.app/Contents/MacOS/MO Downloader"; fi
+          "$APP" --engine-check "$RUNNER_TEMP/engines.json" || true
+          cat "$RUNNER_TEMP/engines.json"
+          python - "$RUNNER_TEMP/engines.json" <<'PY'
+          import json, sys
+          e = json.load(open(sys.argv[1]))
+          assert e["yt_dlp"], "yt-dlp missing"
+          assert e["gallery_dl"], "gallery-dl missing from the build"
+          assert e["impersonate"], "curl-cffi (browser impersonation) missing from the build"
+          assert e["ffmpeg"], "ffmpeg missing"
+          print("engines OK:", e)
+          PY
+          MO_GDL_OUT="$RUNNER_TEMP/gdl.txt" "$APP" --gallery-dl --version || true
+          cat "$RUNNER_TEMP/gdl.txt"; grep -E "^[0-9]+\.[0-9]+" "$RUNNER_TEMP/gdl.txt"
+
+      - name: YouTube above 720p (information only; GitHub's servers are often asked to "confirm you're not a bot")
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m pip install --quiet "yt-dlp[default,curl-cffi]" yt-dlp-ejs
+          python - <<'PY'
+          import yt_dlp
+          with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as y:
+              info = y.extract_info("https://www.youtube.com/watch?v=aqz-KE-bpKQ", download=False)
+          h = max((f.get("height") or 0) for f in info["formats"])
+          print("highest YouTube quality offered:", h)
+          assert h > 720, "only up to %sp offered" % h
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: MO-Downloader-${{ matrix.os }}
@@ -124,6 +157,20 @@ jobs:
             dist/*.dmg
             dist/*.zip
           if-no-files-found: error
+
+  tests:
+    # end-to-end tests against a local test site: attempt chain, impersonation, gallery engine, live recording,
+    # caught streams, error report (tests/run_tests.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - run: python -m pip install --quiet "yt-dlp[default,curl-cffi]" yt-dlp-ejs gallery-dl
+      - run: python src/make.py app/mo_downloader.py
+      - run: python tests/run_tests.py
 
   release:
     if: startsWith(github.ref, 'refs/tags/')

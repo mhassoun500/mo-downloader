@@ -30,8 +30,8 @@ if /i "%~1"=="--background" (
   exit /b 0
 )
 
-echo Updating download engine (yt-dlp, ffmpeg, Deno)... please wait.
-python -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default]" imageio-ffmpeg deno pywebview
+echo Updating download engine (yt-dlp, gallery-dl, ffmpeg, Deno)... please wait.
+python -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview
 
 python "%~dp0app\mo_downloader.py" %*
 if errorlevel 1 pause

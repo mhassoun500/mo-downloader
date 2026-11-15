@@ -106,6 +106,13 @@ const sameHost = (a, b) => { try { return new URL(a).hostname === new URL(b).hos
 async function send(job, tabId) {
   if (!(await ensureApp())) throw new Error("NOT_RUNNING");
   const body = { ua: navigator.userAgent, ...job };
+  if (job.kind === "page" && tabId != null && tabId >= 0 && !job.alt_streams) {
+    // streams and embedded players caught on this page: the app tries them if the page itself has no video it reads
+    const list = await mediaFor(tabId);
+    const pick = [...list.filter((m) => m.kind !== "EMBED"), ...list.filter((m) => m.kind === "EMBED")];
+    body.alt_streams = pick.filter((m) => m.url !== job.url).slice(0, 4)
+      .map((m) => ({ url: m.url, headers: m.headers || { Referer: m.page || job.url }, title: m.title || job.title || "" }));
+  }
   body.cookies = await netscapeCookies(job.url);
   if (job.page && !sameHost(job.page, job.url)) body.page_cookies = await netscapeCookies(job.page);
   const res = await call("api/ext/download", body);
@@ -166,6 +173,20 @@ async function updateBadge(tabId) {
   ext.action.setBadgeText({ text: n ? String(n) : "", tabId }).catch(() => {});
 }
 
+const reqHeaders = new Map(); // requestId -> headers the browser sent (cookies excluded: they travel separately)
+const SKIP_HEADER = /^(cookie|host|content-length|connection|accept-encoding|range|if-range|if-none-match|if-modified-since|priority|upgrade-insecure-requests|sec-.*)$/i;
+function rememberHeaders(d) {
+  const h = {};
+  for (const x of d.requestHeaders || []) if (!SKIP_HEADER.test(x.name) && x.value != null) h[x.name] = x.value;
+  reqHeaders.set(d.requestId, h);
+  if (reqHeaders.size > 400) reqHeaders.delete(reqHeaders.keys().next().value);
+}
+if (has(ext, "webRequest", "onSendHeaders")) {
+  const filter = { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"] };
+  try { ext.webRequest.onSendHeaders.addListener(rememberHeaders, filter, ["requestHeaders", "extraHeaders"]); }
+  catch (e) { try { ext.webRequest.onSendHeaders.addListener(rememberHeaders, filter, ["requestHeaders"]); } catch (e2) {} }
+}
+
 function classify(url, headers, statusCode) {
   const h = {};
   for (const x of headers || []) h[x.name.toLowerCase()] = x.value || "";
@@ -195,7 +216,10 @@ ext.webRequest.onHeadersReceived.addListener(
       if (list.some((m) => m.url === bare)) return;
       let page = "", title = "";
       try { const t = await ext.tabs.get(d.tabId); page = t.url; title = t.title; } catch (e) {}
-      list.unshift({ url: bare, kind: c.kind, size: c.size, ts: Date.now(), page, title });
+      const headers = reqHeaders.get(d.requestId) || {};
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "referer") && (d.initiator || page))
+        headers.Referer = d.initiator && d.initiator !== "null" ? d.initiator + "/" : page;
+      list.unshift({ url: bare, kind: c.kind, size: c.size, ts: Date.now(), page, title, headers });
       await saveMedia(d.tabId, list.slice(0, 25));
     });
   },
@@ -249,16 +273,35 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "jobs":
         return await call("api/ext/jobs");
       case "download": // the page itself (YouTube, any supported site)
-        return await send({ url: msg.url, title: msg.title, preset: msg.preset, kind: "page", page: msg.page || msg.url, referer: msg.page || "" }, tabId);
+        return await send({ url: msg.url, title: msg.title, preset: msg.preset, kind: "page", page: msg.page || msg.url, referer: msg.page || "" }, msg.tabId != null ? msg.tabId : tabId);
       case "downloadFile": // an image or a direct file link
         return await send({ url: msg.url, kind: "file", filename: msg.filename || "", referer: msg.page || "", page: msg.page || "" }, tabId);
       case "downloadMedia": { // a stream caught on the page
         const m = (await mediaFor(msg.tabId)).find((x) => x.url === msg.url) || {};
         return await send({ url: msg.url, kind: "media", preset: msg.preset, title: m.title || msg.title || "video",
-                            referer: m.page || "", page: m.page || "" }, msg.tabId);
+                            referer: m.page || "", page: m.page || "", headers: m.headers || {} }, msg.tabId);
       }
       case "media":
         return { media: await mediaFor(msg.tabId) };
+      case "pageMedia": {
+        if (tabId == null || tabId < 0) return { ok: false };
+        const frame = sender.url || "", top = (sender.tab && sender.tab.url) || "";
+        await withTab(tabId, async () => {
+          const list = await mediaFor(tabId);
+          for (const it of (msg.items || []).slice(0, 20)) {
+            if (!/^https?:/.test(it.url || "") || it.url === top || list.some((m) => m.url === it.url)) continue;
+            list.push({ url: it.url, kind: it.kind || "VIDEO", size: 0, ts: Date.now(), page: frame,
+                        title: (sender.tab && sender.tab.title) || msg.title || "", headers: { Referer: frame }, from: "page" });
+          }
+          await saveMedia(tabId, list.slice(0, 30));
+        });
+        return { ok: true };
+      }
+      case "formats": { // the qualities of a caught stream, asked from the app before downloading
+        if (!(await ensureApp())) throw new Error("NOT_RUNNING");
+        const m = (await mediaFor(msg.tabId)).find((x) => x.url === msg.url) || {};
+        return await call("api/ext/formats", { url: msg.url, headers: m.headers || {}, cookies: await netscapeCookies(msg.url) });
+      }
       case "clearMedia":
         await withTab(msg.tabId, () => saveMedia(msg.tabId, []));
         return { ok: true };
