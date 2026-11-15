@@ -303,8 +303,9 @@ def run_26_tests(app, home, tmp):
     check("browser helper starts the app when it is closed (no browser prompt)", bool(started), str(r)[:200])
     if started:
         try:
+            tok = re.search(r'const TOKEN = "([^"]+)"', OPENER.open(f"http://127.0.0.1:{started}/").read().decode()).group(1)
             OPENER.open(urllib.request.Request(f"http://127.0.0.1:{started}/api/shutdown", data=b"{}",
-                        headers={"X-MO-Ext": "1", "Content-Type": "application/json"}), timeout=5)
+                        headers={"X-Token": tok, "Content-Type": "application/json"}), timeout=5)
         except Exception:
             pass
         time.sleep(2)

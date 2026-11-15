@@ -93,9 +93,6 @@ def start_detached(*args):
     """Start another copy of the app that outlives the caller (the browser ends a native host's children)."""
     import subprocess
     kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
-    bundle = os.environ.get("MO_APP_BUNDLE") or (str(Path(sys.executable).parents[2]) if FROZEN and SYSTEM == "Darwin" else "")
-    if SYSTEM == "Darwin" and bundle.endswith(".app"):
-        return subprocess.Popen(["open", "-g", "-a", bundle, "--args", *args], **kw)
     if SYSTEM == "Windows":
         flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | NEW_PROCESS_GROUP | NO_WINDOW
         try:

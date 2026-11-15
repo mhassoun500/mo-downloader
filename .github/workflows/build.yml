@@ -127,7 +127,8 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then APP="build-tmp/dist/MO Downloader/MO Downloader.exe";
           else APP="build-tmp/dist/MO Downloader.app/Contents/MacOS/MO Downloader"; fi
-          python - "$APP" <<'PY'
+          code=0
+          python - "$APP" <<'PY' || code=$?
           import json, struct, subprocess, sys, time, urllib.request
           app = sys.argv[1]
           def ask(t):
@@ -140,10 +141,9 @@ jobs:
           r = ask("launch"); print("launch:", r); assert r["port"], "the helper did not start the app"
           o = urllib.request.build_opener(urllib.request.ProxyHandler({}))
           print(o.open(f"http://127.0.0.1:{r['port']}/api/ping", timeout=5).read())
-          o.open(urllib.request.Request(f"http://127.0.0.1:{r['port']}/api/shutdown", data=b"{}",
-                 headers={"X-MO-Ext": "1", "Content-Type": "application/json"}), timeout=10)
-          time.sleep(3)
           PY
+          if [ "$RUNNER_OS" = "Windows" ]; then taskkill //F //IM "MO Downloader.exe" || true; else pkill -f "MO Downloader.app" || true; fi
+          [ $code -eq 0 ] || { tail -30 ~/.media_downloader/log.txt 2>/dev/null; exit 1; }
 
       - name: Check the bundled engines (yt-dlp, gallery-dl, browser impersonation)
         shell: bash

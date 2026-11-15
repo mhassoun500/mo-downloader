@@ -115,14 +115,12 @@ async def main_async(app, home):
         lp = await ctx.new_page()
         await lp.goto(SITE + "/pages/links.html")
         before = {j["id"] for j in app.api("/api/jobs")["jobs"]}
+        in_browser = []
+        lp.on("download", lambda d: in_browser.append(d.suggested_filename))
         await lp.click("#mp4")
-        try:
-            async with lp.expect_download(timeout=8000) as dl:
-                await lp.click("#txt")
-            txt_in_browser = (await dl.value).suggested_filename == "note.txt"
-        except Exception as e:  # noqa: BLE001
-            txt_in_browser = False
-        time.sleep(3)
+        await lp.click("#txt")
+        await lp.wait_for_timeout(4000)
+        txt_in_browser = "note.txt" in in_browser
         new = [j for j in app.api("/api/jobs")["jobs"] if j["id"] not in before]
         rt.check("browser download of a video handed to the app", any("clip3" in (j.get("url") or "") for j in new),
                  str([j.get("url") for j in new]))
