@@ -1,6 +1,11 @@
 const ext = globalThis.browser ?? chrome;
 const $ = (id) => document.getElementById(id);
-const DEFAULTS = { capture: false, videoButton: true, imageButton: true, sendCookies: true };
+const DEFAULTS = {
+  capture: false, videoButton: true, imageButton: true, sendCookies: true,
+  captureMinMB: 2,
+  captureExts: "mp4 mkv webm mov avi m4v ts mp3 m4a aac flac wav ogg opus zip rar 7z iso dmg exe msi apk",
+  captureSkip: "",
+};
 let tab = null, running = false, sniffOff = false;
 
 function send(msg) {
@@ -155,9 +160,17 @@ async function go(preset) {
   const opts = await ext.storage.local.get(DEFAULTS);
   for (const k of Object.keys(DEFAULTS)) {
     const box = $("o-" + k);
-    box.checked = !!opts[k];
-    box.onchange = () => ext.storage.local.set({ [k]: box.checked });
+    if (!box) continue;
+    if (typeof DEFAULTS[k] === "boolean") {
+      box.checked = !!opts[k];
+      box.onchange = () => { ext.storage.local.set({ [k]: box.checked }); if (k === "capture") showCapture(); };
+    } else {
+      box.value = opts[k];
+      box.onchange = () => ext.storage.local.set({ [k]: typeof DEFAULTS[k] === "number" ? Math.max(0, +box.value || 0) : box.value.trim() });
+    }
   }
+  const showCapture = () => { $("captureOpts").style.display = $("o-capture").checked ? "" : "none"; };
+  showCapture();
 
   await refreshStatus();
   await refreshMedia();

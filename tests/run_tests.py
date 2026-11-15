@@ -44,6 +44,18 @@ def make_media(root):
        "-map", "[a]", "-map", "[b2]", "-map", "1:a", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast",
        "-c:a", "aac", "-b:v:0", "2000k", "-b:v:1", "600k", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod",
        "-master_pl_name", "master.m3u8", "-var_stream_map", "v:0,a:0 v:1,a:1", str(root / "hls_%v.m3u8"))
+    # a longer stream in 1-second pieces (pause / resume of a stream that comes in pieces)
+    sh(ff, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25", "-f", "lavfi",
+       "-i", "sine=frequency=600", "-t", "24", "-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-b:v", "900k",
+       "-c:a", "aac", "-f", "hls", "-hls_time", "1", "-hls_playlist_type", "vod",
+       "-hls_segment_filename", str(root / "long_%03d.ts"), str(root / "long.m3u8"))
+    sh(ff, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25", "-f", "lavfi",
+       "-i", "sine=frequency=700", "-t", "10", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "1500k",
+       "-c:a", "aac", str(root / "big.mp4"))
+    for i in range(4, 8):
+        shutil.copy(root / "clip.mp4", root / f"clip{i}.mp4")
+    (root / "list-ch.txt").write_text("clip4.mp4 clip5.mp4", encoding="utf-8")
+    (root / "list-pl.txt").write_text("/slow/big.mp4 /slow/clip6.mp4 /slow/clip7.mp4", encoding="utf-8")
     (root / "nomedia.html").write_text("<html><head><title>No media here</title></head><body><p>Just text.</p></body></html>",
                                        encoding="utf-8")
     (root / "live").mkdir()
@@ -107,6 +119,10 @@ class App:
             time.sleep(0.25)
         return self.job(jid)
 
+    def kill(self):  # like a crash or a forced quit
+        self.proc.kill()
+        self.proc.wait(10)
+
     def stop(self):
         try:
             self.api("/api/shutdown", {})
@@ -132,6 +148,168 @@ def duration(fp):
         return 0.0
 
 
+def slow_hits():
+    return json.loads(OPENER.open(SITE + "/slow-count").read())
+
+
+def files_in(d):
+    return sorted(str(p.relative_to(d)) for p in Path(d).rglob("*") if p.is_file()) if Path(d).exists() else []
+
+
+def run_26_tests(app, home, tmp):
+    data = home / ".media_downloader"
+    out = home / "Downloads" / "MO Downloader"
+
+    # --- the version number has one source
+    ver = (REPO / "VERSION").read_text().strip()
+    check("version comes from the VERSION file", app.api("/api/status").get("app") == ver, app.api("/api/status").get("app"))
+
+    # --- error classes (also unit-tested in tests/test_errors.py)
+    r = subprocess.run([sys.executable, str(REPO / "tests" / "test_errors.py")], capture_output=True, text=True)
+    check("error classes: login / network / blocked recognised precisely", r.returncode == 0, (r.stdout + r.stderr).strip()[-300:])
+
+    # --- history moved into the database, read in pages, delete one
+    h = app.api("/api/history?limit=2")
+    check("old history carried over into the database", any(x.get("title") == "Old download 1" for x in
+          app.api("/api/history?limit=100&q=Old")["items"]) and not (data / "history.jsonl").exists(), f"total {h.get('total')}")
+    check("history is read in pages", len(h["items"]) == 2 and h["more"] and h["total"] >= 5, f"{len(h['items'])} of {h['total']}")
+    page2 = app.api("/api/history?limit=2&offset=2")["items"]
+    check("history next page continues", page2 and page2[0].get("date") != h["items"][0].get("date"), "")
+    n0 = app.api("/api/history?limit=1")["total"]
+    app.api("/api/history/delete", {"key": "old 0"})
+    check("history delete removes one entry", app.api("/api/history?limit=1")["total"] == n0 - 1, "")
+
+    # --- cookies handed over by the extension are not left on disk
+    left = [p.name for p in (data / "tmp").glob("ck-*")] if (data / "tmp").exists() else []
+    check("temporary cookie files deleted after the download", not left, str(left))
+
+    # --- clip: only part of a video
+    j = app.wait(app.api("/api/download", {"url": SITE + "/files/clip2.mp4", "mode": "preset", "preset": "best",
+                                           "clip_start": "1", "clip_end": "4"})["id"])
+    d = duration(j["file"]) if j.get("file") else 0
+    check("clip: only the chosen part", j["status"] == "done" and 2.5 <= d <= 4.5, f"{j['status']} · {d:.1f}s")
+
+    # --- batch + skip what was downloaded before
+    r = app.api("/api/batch", {"urls": f"{SITE}/files/clip3.mp4\n{SITE}/files/clip.mp4\n", "preset": "best", "skip": True})
+    time.sleep(1)
+    bj = [j for j in app.api("/api/jobs")["jobs"] if j.get("source") == "batch"]
+    bj = [app.wait(j["id"]) for j in bj]
+    skipped = [j["url"] for j in bj if "سابقاً" in (j.get("stage") or "")]
+    check("batch of links queued", r.get("count") == 2 and len(bj) == 2, str(r))
+    check("batch skips only what was already downloaded", skipped == [f"{SITE}/files/clip.mp4"],
+          " | ".join(f"{j['url'].rsplit('/', 1)[1]}: {j['stage']}" for j in bj))
+
+    # --- following: only new videos are downloaded
+    s = app.api("/api/subs/add", {"url": SITE + "/list/ch.html", "start": "new", "preset": "best"})
+    sid = s.get("sub", {}).get("id")
+    check("follow: list added, nothing old downloaded", sid and s["sub"]["count_seen"] == 2, str(s)[:150])
+    (tmp / "site" / "list-ch.txt").write_text("clip4.mp4 clip5.mp4 clip6.mp4", encoding="utf-8")
+    app.api("/api/subs/check", {"id": sid})
+    time.sleep(1)
+    sj = [j for j in app.api("/api/jobs")["jobs"] if j.get("sub_id") == sid][-1]
+    sj = app.wait(sj["id"])
+    check("follow: the new video (only) downloaded", sj["status"] == "done" and sj.get("done_count") == 1,
+          f"{sj['status']} · {sj.get('done_count')} · {sj['stage']}")
+
+    # --- proxy: always through the user's proxy
+    app.api("/api/settings", {"proxy": SITE, "proxy_mode": "always"})
+    before = int(OPENER.open(SITE + "/proxy-count").read())
+    j = app.wait(app.api("/api/download", {"url": f"http://localhost:{SITE_PORT}/files/clip7.mp4", "mode": "preset", "preset": "best"})["id"])
+    hits = int(OPENER.open(SITE + "/proxy-count").read()) - before
+    app.api("/api/settings", {"proxy": "", "proxy_mode": "fallback"})
+    check("proxy: download goes through the proxy", j["status"] == "done" and hits >= 1, f"{j['status']} · {hits} proxied requests")
+
+    # --- pause / resume a stream that comes in pieces: continues, does not start over
+    jid = app.api("/api/download", {"url": SITE + "/slow/long.m3u8", "mode": "preset", "preset": "best", "title": "pause test"})["id"]
+    for _ in range(240):
+        j = app.job(jid)
+        if (j.get("percent") or 0) >= 30:
+            break
+        time.sleep(0.25)
+    app.api("/api/pause", {"id": jid})
+    j = app.wait(jid, 30, until=("paused", "done", "error"))
+    mid = sum(v for k, v in slow_hits().items() if k.startswith("long_"))
+    app.api("/api/resume", {"id": jid})
+    j = app.wait(jid, 180)
+    hits = {k: v for k, v in slow_hits().items() if k.startswith("long_")}
+    again = sum(v - 1 for v in hits.values() if v > 1)
+    check("pause a stream in pieces", mid > 3, f"paused after {mid} pieces")
+    check("resume continues where it stopped (pieces not fetched again)",
+          j["status"] == "done" and len(hits) == 24 and again <= 3 and duration(j["file"]) > 22,
+          f"{j['status']} · {len(hits)} pieces · {again} fetched again · {duration(j['file']) if j.get('file') else 0:.1f}s")
+
+    # --- pause / resume a list: finished items are not downloaded again
+    jid = app.api("/api/download", {"url": SITE + "/list/pl.html", "playlist": True, "mode": "preset", "preset": "best"})["id"]
+    for _ in range(400):
+        j = app.job(jid)
+        if (j.get("done_count") or 0) >= 1 or j["status"] in ("done", "error"):
+            break
+        time.sleep(0.25)
+    app.api("/api/pause", {"id": jid})
+    j = app.wait(jid, 60, until=("paused", "done", "error"))
+    paused_ok = j["status"] == "paused"
+    first = dict(slow_hits())
+    app.api("/api/resume", {"id": jid})
+    j = app.wait(jid, 240)
+    check("pause a list", paused_ok, j["status"])
+    hits = slow_hits()
+    check("resumed list finishes without downloading finished items again",
+          j["status"] == "done" and (j.get("done_count") or 0) == 3 and hits.get("big.mp4") == first.get("big.mp4"),
+          f"{j['status']} · {j.get('done_count')} items · big.mp4 requested {first.get('big.mp4')} → {hits.get('big.mp4')}")
+
+    # --- the queue survives the app being closed (even forcibly)
+    jid = app.api("/api/download", {"url": SITE + "/slow/big.mp4", "mode": "preset", "preset": "best", "title": "survives restart"})["id"]
+    pid = app.api("/api/download", {"url": SITE + "/files/clip.mp4", "mode": "preset", "preset": "720", "title": "stays paused"})["id"]
+    app.api("/api/pause", {"id": pid})
+    for _ in range(120):
+        if (app.job(jid).get("percent") or 0) > 10:
+            break
+        time.sleep(0.25)
+    time.sleep(3)  # the queue is written every 2 seconds
+    qmode = oct((data / "queue.json").stat().st_mode & 0o777) if (data / "queue.json").exists() else "missing"
+    app.kill()
+    app2 = App(home)
+    try:
+        jobs = {j["id"]: j for j in app2.api("/api/jobs")["jobs"]}
+        check("queue saved privately (owner only)", qmode == "0o600", qmode)
+        check("after restart: the running download is back", jid in jobs, str(list(jobs))[:100])
+        check("after restart: the paused download is still paused", jobs.get(pid, {}).get("status") == "paused",
+              jobs.get(pid, {}).get("status"))
+        j = app2.wait(jid, 240) if jid in jobs else {}
+        check("after restart: the download completes", j.get("status") == "done" and duration(j.get("file") or "") > 9,
+              f"{j.get('status')} · {(j.get('error') or '')[:100]}")
+
+        # --- the browser helper (native messaging): reports the port, and starts the app when it is not running
+        ext_id = re.search(r'EXT_ID_CHROME = "([a-p]{32})"', APP.read_text()).group(1)
+        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home), "MD_PORT": str(APP_PORT), "MD_NO_WINDOW": "1",
+               "MD_NO_BROWSER": "1", "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+
+        def native(msg):
+            import struct
+            raw = json.dumps(msg).encode()
+            p = subprocess.run([sys.executable, str(APP), f"chrome-extension://{ext_id}/"], input=struct.pack("<I", len(raw)) + raw,
+                               capture_output=True, env=env, timeout=60)
+            n = struct.unpack("<I", p.stdout[:4])[0] if len(p.stdout) >= 4 else 0
+            return json.loads(p.stdout[4:4 + n]) if n else {"raw": p.stdout[:200], "err": p.stderr[-300:]}
+        port = int(app2.base.rsplit(":", 1)[1])
+        r = native({"type": "ping"})
+        check("browser helper reports the app's port", r.get("port") == port, str(r)[:200])
+        reg = list((home / ".config").rglob("com.mo.downloader.json")) if (home / ".config").exists() else []
+    finally:
+        app2.stop()
+    time.sleep(2)
+    r = native({"type": "launch"})
+    started = r.get("port")
+    check("browser helper starts the app when it is closed (no browser prompt)", bool(started), str(r)[:200])
+    if started:
+        try:
+            OPENER.open(urllib.request.Request(f"http://127.0.0.1:{started}/api/shutdown", data=b"{}",
+                        headers={"X-MO-Ext": "1", "Content-Type": "application/json"}), timeout=5)
+        except Exception:
+            pass
+        time.sleep(2)
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="mo-tests-"))
     site_root, home = tmp / "site", tmp / "home"
@@ -142,6 +320,12 @@ def main():
     site = subprocess.Popen([sys.executable, str(Path(__file__).with_name("testsite.py")), str(site_root), str(SITE_PORT)])
     live = start_live(site_root)
     assert wait_url(SITE + "/files/clip.mp4")
+    # history kept by an earlier version (one JSON line per download) must be carried into the new database
+    data = home / ".media_downloader"
+    data.mkdir()
+    (data / "history.jsonl").write_text("".join(json.dumps({"key": f"old {i}", "title": f"Old download {i}",
+                                                            "date": 1700000000 + i, "quality": "720p · mp4"}) + "\n"
+                                                for i in range(3)), encoding="utf-8")
     app = App(home)
     try:
         st = app.api("/api/status")
@@ -212,6 +396,8 @@ def main():
         t = app.api("/api/test_url", {"url": SITE + "/browser-only/clip.mp4"})
         check("link tester reports the method that worked", (t.get("probe") or {}).get("method", "").startswith("انتحال"),
               json.dumps(t, ensure_ascii=False)[:200])
+
+        run_26_tests(app, home, tmp)
 
         if NETWORK:
             # 8) a public image album: the first engine finds nothing, the gallery engine downloads the files

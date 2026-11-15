@@ -32,6 +32,9 @@
   .m .k{font-weight:700;color:var(--warn);flex:none;font-size:11.5px;background:var(--chip);border-radius:6px;padding:0 6px}
   .m .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:left;color:var(--muted)}
   .empty{color:var(--muted);font-size:12.5px;padding:8px 10px}
+  .capopts{display:flex;flex-direction:column;gap:5px;margin:2px 22px 4px 0;font-size:12px;color:var(--muted)}
+  .capopts label:not(:first-child){flex-direction:column;align-items:stretch;gap:2px}
+  .capopts input[type=text]{width:100%;box-sizing:border-box;font-size:11.5px;padding:3px 5px;margin-top:2px}
   .qs{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:190px}
   .media{max-height:240px}
   .opts{display:grid;gap:6px;font-size:13px}
@@ -72,7 +75,12 @@
   <div class="opts">
     <label><input type="checkbox" id="o-videoButton"> زر التنزيل فوق الفيديوهات</label>
     <label><input type="checkbox" id="o-imageButton"> زر التنزيل فوق الصور</label>
-    <label><input type="checkbox" id="o-capture"> تمرير كل تنزيلات المتصفح إلى MO Downloader</label>
+    <label><input type="checkbox" id="o-capture"> تمرير تنزيلات المتصفح إلى MO Downloader</label>
+    <div class="capopts" id="captureOpts">
+      <label>فقط الملفات الأكبر من <input type="number" id="o-captureMinMB" min="0" step="1" style="width:56px"> ميغابايت</label>
+      <label>الأنواع (اتركها فارغة لكل الأنواع)<input type="text" id="o-captureExts" dir="ltr"></label>
+      <label>مواقع تبقى تنزيلاتها في المتصفح<input type="text" id="o-captureSkip" dir="ltr" placeholder="drive.google.com, mail.google.com"></label>
+    </div>
     <label><input type="checkbox" id="o-sendCookies"> استخدام تسجيل دخولي في الموقع عند الحاجة</label>
   </div>
   <div class="hint">اختصار سريع: Alt+Shift+S لتنزيل الصفحة الحالية بأفضل جودة.</div>

@@ -30,8 +30,12 @@ if /i "%~1"=="--background" (
   exit /b 0
 )
 
-echo Updating download engine (yt-dlp, gallery-dl, ffmpeg, Deno)... please wait.
-python -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview
+rem --- first run only: install what is missing. The app itself keeps the engines current in the background (once a day).
+python -c "import yt_dlp, gallery_dl, curl_cffi, imageio_ffmpeg, deno, webview, pystray, PIL" >nul 2>nul
+if errorlevel 1 (
+  echo Installing the download engine ^(yt-dlp, gallery-dl, ffmpeg, Deno^)... first run only, please wait.
+  python -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview pystray pillow
+)
 
 python "%~dp0app\mo_downloader.py" %*
 if errorlevel 1 pause

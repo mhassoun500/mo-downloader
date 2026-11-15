@@ -1,8 +1,15 @@
 // MO Downloader browser extension — talks to the MO Downloader app running on this computer.
 const ext = globalThis.browser ?? chrome;
-const PORTS = [8765, 8766, 8767, 8768, 8769, 8770];
+const PORTS = Array.from({ length: 10 }, (_, i) => 8765 + i); // the same ten ports the app chooses from
+const NATIVE = "com.mo.downloader"; // helper registered by the app: starts it without the browser's "Open?" prompt
 const HEADERS = { "X-MO-Ext": "1", "Content-Type": "application/json" };
-const DEFAULTS = { capture: false, videoButton: true, imageButton: true, sendCookies: true };
+const DEFAULTS = {
+  capture: false, videoButton: true, imageButton: true, sendCookies: true,
+  // which browser downloads go to the app (when "capture" is on)
+  captureMinMB: 2,
+  captureExts: "mp4 mkv webm mov avi m4v ts mp3 m4a aac flac wav ogg opus zip rar 7z iso dmg exe msi apk",
+  captureSkip: "",
+};
 let base = null;
 
 const PRESETS = [
@@ -35,14 +42,32 @@ async function probe(url) {
   }
 }
 
+// Ask the app's helper (native messaging). type "launch" starts the app if it isn't running. Returns its port or null.
+async function nativeAsk(type) {
+  if (!has(ext, "runtime", "sendNativeMessage")) return null;
+  try {
+    const r = await ext.runtime.sendNativeMessage(NATIVE, { type });
+    return r && r.port ? r.port : null;
+  } catch (e) {
+    return null; // helper not registered yet (the app registers it the first time it runs)
+  }
+}
+
 async function findServer() {
   if (base && (await probe(base))) return base;
   base = null;
-  for (const p of PORTS) {
-    const u = `http://127.0.0.1:${p}/`;
-    if (await probe(u)) return (base = u);
-  }
+  const { lastPort } = await ext.storage.local.get({ lastPort: 0 }); // a port the helper reported earlier
+  const ports = lastPort && !PORTS.includes(lastPort) ? [lastPort, ...PORTS] : PORTS;
+  const found = await Promise.all(ports.map((p) => probe(`http://127.0.0.1:${p}/`).then((ok) => (ok ? p : null))));
+  const p = found.find((x) => x);
+  if (p) return (base = `http://127.0.0.1:${p}/`);
   return null;
+}
+
+function useNativePort(port) {
+  base = `http://127.0.0.1:${port}/`;
+  ext.storage.local.set({ lastPort: port }).catch(() => {});
+  return true;
 }
 
 async function call(path, body) {
@@ -58,8 +83,16 @@ async function call(path, body) {
   return j;
 }
 
-// Start the app through the mo-downloader:// link registered by its installer, then wait for it.
+// Start the app: through its helper (no prompt), else through the mo-downloader:// link (the browser asks first).
 async function launchApp() {
+  const port = await nativeAsk("launch");
+  if (port) {
+    const u = `http://127.0.0.1:${port}/`;
+    for (let i = 0; i < 20; i++) {
+      if (await probe(u)) return useNativePort(port);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
   let tab = null;
   try {
     tab = await ext.tabs.create({ url: "mo-downloader://start", active: true });
@@ -77,6 +110,8 @@ async function launchApp() {
 
 async function ensureApp() {
   if (await findServer()) return true;
+  const port = await nativeAsk("ping"); // running on a port outside the usual ten?
+  if (port && (await probe(`http://127.0.0.1:${port}/`))) return useNativePort(port);
   return await launchApp();
 }
 
@@ -242,10 +277,27 @@ if (has(ext, "tabs", "onRemoved")) ext.tabs.onRemoved.addListener((tabId) => {
 });
 
 // ---------------------------------------------------------------- hand browser downloads to the app
+function wantDownload(item, url, o) {
+  let host = "";
+  try { host = new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return false; }
+  const ref = (() => { try { return new URL(item.referrer || "").hostname.replace(/^www\./, ""); } catch (e) { return ""; } })();
+  const skip = String(o.captureSkip || "").split(/[\s,]+/).map((x) => x.trim().replace(/^www\./, "").toLowerCase()).filter(Boolean);
+  if (skip.some((d) => [host, ref].some((h) => h && (h === d || h.endsWith("." + d))))) return false;
+  const exts = String(o.captureExts || "").toLowerCase().split(/[\s,.]+/).filter(Boolean);
+  const name = (item.filename || "").split(/[\\/]/).pop() || url.split(/[?#]/)[0].split("/").pop();
+  const ext_ = (name.match(/\.([a-z0-9]{1,5})$/i) || [])[1];
+  if (exts.length && !(ext_ && exts.includes(ext_.toLowerCase()))) return false;
+  const size = item.totalBytes > 0 ? item.totalBytes : item.fileSize > 0 ? item.fileSize : 0;
+  const min = Math.max(0, +o.captureMinMB || 0) * 1048576;
+  if (min && size && size < min) return false; // size unknown at this point: the type decides
+  return true;
+}
+
 if (has(ext, "downloads", "onCreated")) ext.downloads.onCreated.addListener(async (item) => {
-  const { capture } = await options();
+  const o = await options();
   const url = item.finalUrl || item.url;
-  if (!capture || !/^https?:/.test(url || "") || item.byExtensionId === ext.runtime.id) return;
+  if (!o.capture || !/^https?:/.test(url || "") || item.byExtensionId === ext.runtime.id) return;
+  if (!wantDownload(item, url, o)) return; // small files, other types, excluded sites: the browser keeps them
   if (!(await findServer())) return; // app closed: the browser downloads it normally
   try {
     await ext.downloads.cancel(item.id);

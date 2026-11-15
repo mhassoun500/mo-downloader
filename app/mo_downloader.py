@@ -31,18 +31,25 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"  # written by src/make.py from the VERSION file — change it there
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
 BACKGROUND = "--background" in sys.argv or any(a.lower().startswith(PROTOCOL + ":") for a in sys.argv[1:])
 DEFAULT_PORT = int(os.environ.get("MD_PORT", 8765))
+PORT_SPAN = 10  # the app uses one of DEFAULT_PORT … DEFAULT_PORT+9; the browser extension looks at the same ten
 SYSTEM = platform.system()
 
 APP_DATA = Path.home() / ".media_downloader"
 APP_DATA.mkdir(parents=True, exist_ok=True)
 SETTINGS_FILE = APP_DATA / "settings.json"
-HISTORY_FILE = APP_DATA / "history.jsonl"
+HISTORY_FILE = APP_DATA / "history.jsonl"  # before 2.6; moved into HISTORY_DB on first start
+HISTORY_DB = APP_DATA / "history.db"
+QUEUE_FILE = APP_DATA / "queue.json"
+PORT_FILE = APP_DATA / "port.txt"
+NATIVE_HOST = "com.mo.downloader"
+EXT_ID_CHROME = "kfiopiphhapdnaeibmhmdloghbnheeoo"          # fixed by the "key" in the extension's manifest
+EXT_ID_FIREFOX = "mo-downloader@mo.local"
 ARCHIVE_FILE = APP_DATA / "archive.txt"
 SUBS_FILE = APP_DATA / "subscriptions.json"
 SUBS_DIR = APP_DATA / "subscriptions"
@@ -51,6 +58,92 @@ COOKIE_FILE = APP_DATA / "cookies.txt"
 LOG_FILE = APP_DATA / "log.txt"
 TMP_DIR = APP_DATA / "tmp"
 TOOLS_DIR = APP_DATA / "tools"
+
+def private_file(path):
+    """Cookies and the saved queue: readable by this user only (on Windows the user's home folder is already private)."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _ping_port(timeout=0.8):
+    """The port of the running MO Downloader, or None."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    ports = list(range(DEFAULT_PORT, DEFAULT_PORT + PORT_SPAN))
+    try:
+        ports.insert(0, int(PORT_FILE.read_text().strip()))
+    except (OSError, ValueError):
+        pass
+    for p in dict.fromkeys(ports):
+        try:
+            with opener.open(f"http://127.0.0.1:{p}/api/ping", timeout=timeout) as r:
+                if json.loads(r.read()).get("app") == APP_NAME:
+                    return p
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def self_command(*args):
+    return [sys.executable, *args] if FROZEN else [sys.executable, os.path.abspath(__file__), *args]
+
+
+def start_detached(*args):
+    """Start another copy of the app that outlives the caller (the browser ends a native host's children)."""
+    import subprocess
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+    bundle = os.environ.get("MO_APP_BUNDLE") or (str(Path(sys.executable).parents[2]) if FROZEN and SYSTEM == "Darwin" else "")
+    if SYSTEM == "Darwin" and bundle.endswith(".app"):
+        return subprocess.Popen(["open", "-g", "-a", bundle, "--args", *args], **kw)
+    if SYSTEM == "Windows":
+        flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | NEW_PROCESS_GROUP | NO_WINDOW
+        try:
+            return subprocess.Popen(self_command(*args), creationflags=flags | 0x01000000, **kw)  # + BREAKAWAY_FROM_JOB
+        except OSError:
+            return subprocess.Popen(self_command(*args), creationflags=flags, **kw)
+    return subprocess.Popen(self_command(*args), start_new_session=True, **kw)
+
+
+def native_host_main():
+    """Talk to the browser extension over native messaging: report the app's port, starting the app first if asked.
+    This replaces the browser's "Open MO Downloader?" prompt of the mo-downloader:// link."""
+    import struct
+    if SYSTEM == "Windows":
+        import msvcrt
+        if sys.stdin is not None and sys.stdout is not None:
+            msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
+            msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+            inp, out = sys.stdin.buffer, sys.stdout.buffer
+        else:  # the windowed build has no sys.stdin/stdout, but the browser still hands it the pipes
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.GetStdHandle.restype = ctypes.c_void_p
+            inp = os.fdopen(msvcrt.open_osfhandle(k.GetStdHandle(-10), os.O_RDONLY | os.O_BINARY), "rb")
+            out = os.fdopen(msvcrt.open_osfhandle(k.GetStdHandle(-11), os.O_BINARY), "wb")
+    else:
+        inp, out = sys.stdin.buffer, sys.stdout.buffer
+    raw = inp.read(4)
+    msg = json.loads(inp.read(struct.unpack("<I", raw)[0]) or b"{}") if len(raw) == 4 else {}
+    port = _ping_port()
+    if not port and msg.get("type") == "launch":
+        start_detached("--background")
+        for _ in range(60):
+            time.sleep(0.5)
+            port = _ping_port()
+            if port:
+                break
+    reply = json.dumps({"ok": bool(port), "port": port, "app": APP_NAME, "version": APP_VERSION}).encode()
+    out.write(struct.pack("<I", len(reply)) + reply)
+    out.flush()
+
+
+if any(a.startswith("chrome-extension://") or a == EXT_ID_FIREFOX for a in sys.argv[1:]):
+    try:
+        native_host_main()
+    except Exception:  # noqa: BLE001
+        pass
+    sys.exit(0)
 
 # Without a console (frozen app / pythonw) there is no stdout: write to a log file instead.
 if sys.stdout is None or sys.stderr is None:
@@ -366,8 +459,6 @@ def engine_update_check(force=False):
         return
     if not force and time.time() - float(SETTINGS.get("engine_checked") or 0) < 20 * 3600:
         return
-    if not force and not FROZEN:
-        return  # the Python version's launcher upgrades the engines with pip at start-up
     ENGINE.update(updating=True, msg="جارٍ التحقق من تحديثات المحرك…")
     try:
         nightly = SETTINGS.get("engine_channel") == "nightly"
@@ -396,12 +487,60 @@ PAUSED = "paused"
 FINISHED = ("done", "error", "cancelled")
 
 HISTORY_LOCK = threading.Lock()
-HISTORY = []
-for _line in (HISTORY_FILE.read_text(encoding="utf-8").splitlines() if HISTORY_FILE.exists() else []):
-    try:
-        HISTORY.append(json.loads(_line))
-    except ValueError:
-        pass
+HISTORY_COLS = ("key", "id", "title", "url", "file", "quality", "size", "date", "uploader", "duration", "site",
+                "source", "clip", "method")
+
+
+def _history_insert(db, entries):
+    for e in entries:
+        extra = {k: v for k, v in e.items() if k not in HISTORY_COLS}
+        db.execute(f"INSERT INTO history ({', '.join(HISTORY_COLS)}, extra) VALUES ({', '.join('?' * (len(HISTORY_COLS) + 1))})",
+                   [e.get(k) if not isinstance(e.get(k), (dict, list)) else json.dumps(e.get(k)) for k in HISTORY_COLS]
+                   + [json.dumps(extra, ensure_ascii=False) if extra else None])
+
+
+def _history_db():
+    """The download history in a local SQLite database (before 2.6 it was one JSON file read whole into memory
+    and rewritten on every delete)."""
+    import sqlite3
+    db = sqlite3.connect(str(HISTORY_DB), check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE IF NOT EXISTS history (n INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, id TEXT, title TEXT,"
+               " url TEXT, file TEXT, quality TEXT, size INTEGER, date REAL, uploader TEXT, duration REAL, site TEXT,"
+               " source TEXT, clip TEXT, method TEXT, extra TEXT)")
+    db.execute("CREATE INDEX IF NOT EXISTS history_key ON history(key)")
+    if HISTORY_FILE.exists():
+        rows = []
+        for line in HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+        _history_insert(db, rows)
+        db.commit()
+        HISTORY_FILE.replace(HISTORY_FILE.with_name("history.jsonl.migrated"))
+    return db
+
+
+def _history_row(r):
+    d = {k: r[k] for k in HISTORY_COLS if r[k] is not None}
+    if r["extra"]:
+        try:
+            d.update(json.loads(r["extra"]))
+        except ValueError:
+            pass
+    return d
+
+
+HISTORY = _history_db()
+
+
+def history_add(entry):
+    with HISTORY_LOCK:
+        _history_insert(HISTORY, [entry])
+        HISTORY.commit()
+
+
 ARCHIVE = set(ARCHIVE_FILE.read_text(encoding="utf-8").split("\n")) - {""} if ARCHIVE_FILE.exists() else set()
 
 SUBS_LOCK = threading.RLock()
@@ -431,8 +570,30 @@ def append_line(path, line):
         f.write(line + "\n")
 
 
-class Cancelled(Exception):
-    pass
+class Cancelled(yt_dlp.utils.DownloadCancelled):
+    """Pause / cancel. A DownloadCancelled is never swallowed by yt-dlp, so a list stops too instead of
+    treating it as one failed item and moving on to the next."""
+    msg = "Cancelled by the user"
+
+
+# Web pages without a dedicated extractor (the "generic" one) number their videos by position or name them after
+# the file ("master", "index"): keys that change when a page adds a video, or that collide across sites. Key them by
+# the media address instead, so "skip what I already have" and following such a page work.
+_yt_archive_id = yt_dlp.YoutubeDL._make_archive_id
+
+
+def _mo_archive_id(self, info):
+    key = _yt_archive_id(self, info)
+    if key and key.split(" ", 1)[0] in ("generic", "html5mediaembed"):
+        import hashlib
+        media = next((f.get("url") for f in info.get("formats") or [] if f.get("url")), None) or info.get("url") \
+            or info.get("webpage_url")
+        if media:
+            key = key.split(" ", 1)[0] + " u" + hashlib.sha1(str(media).encode()).hexdigest()[:16]
+    return key
+
+
+yt_dlp.YoutubeDL._make_archive_id = _mo_archive_id
 
 
 # ---------------------------------------------------------------- aria2 (multi-connection downloads)
@@ -644,14 +805,35 @@ def cookie_file_for(url):
     f = TMP_DIR / f"ck-{hashlib.sha1(site_of(url).encode()).hexdigest()[:12]}.txt"
     if not text.lstrip().startswith("#"):
         text = "# Netscape HTTP Cookie File\n" + text
+    if SYSTEM != "Windows":
+        TMP_DIR.chmod(0o700)
     f.write_text(text, encoding="utf-8")
+    private_file(f)
+    job = TMP_COOKIE_JOBS.get(threading.get_ident())
+    if job is not None:
+        job.setdefault("_tmp_files", set()).add(str(f))
     return str(f)
 
 
-AUTH_ERRORS = ("sign in", "log in", "login", "logged in", "cookies", "not a bot", "age-restricted", "age restricted",
-               "inappropriate for some users", "private video", "members only", "members-only", "premium",
-               "registered users", "subscription", "http error 401", "http error 403", "account",
-               "status=401", "status=403", "401 unauthorized", "403 forbidden")
+TMP_COOKIE_JOBS = {}  # job thread -> job, so its temporary cookie files are deleted when it ends
+
+
+def drop_tmp_files(job):
+    for f in job.pop("_tmp_files", None) or ():
+        if not any(f in (j.get("_tmp_files") or ()) for j in list(JOBS.values()) if j is not job and j["status"] in RUNNING):
+            Path(f).unlink(missing_ok=True)
+
+
+# Only phrases that really mean "log in / prove who you are": a word like "cookies" or "account" alone also appears in
+# messages where logging in does not help (e.g. "account terminated"), and wrongly retried with the browser's login.
+AUTH_ERRORS = ("sign in to confirm", "sign in to view", "sign in to watch", "please sign in", "sign in required",
+               "login required", "log in to", "log in or sign up", "logged-in", "logged in users", "requires login",
+               "requires authentication", "authentication required", "use --cookies", "--cookies-from-browser",
+               "not a bot", "age-restricted", "age restricted", "confirm your age", "inappropriate for some users",
+               "private video", "video is private", "members only", "members-only", "join this channel",
+               "premium members", "requires a premium", "youtube premium", "registered users", "subscribers only",
+               "subscriber-only", "http error 401", "status=401", "401 unauthorized", "account required",
+               "requires an account")
 
 
 def is_auth_error(msg):
@@ -771,9 +953,7 @@ def run_file_job(job, req, flags):
              "size": os.path.getsize(path) if os.path.exists(path) else None, "date": time.time(),
              "uploader": None, "duration": None, "site": site_of(req.get("page") or req["url"]),
              "source": job.get("source_label") or "", "clip": ""}
-    with HISTORY_LOCK:
-        HISTORY.append(entry)
-        append_line(HISTORY_FILE, json.dumps(entry, ensure_ascii=False))
+    history_add(entry)
     with JOBS_LOCK:
         job.update(file=path, done_count=1, title=Path(path).name)
     return 0
@@ -823,12 +1003,16 @@ def clean_err(e):
     return msg + ("\n\n" + "\n".join(hints) if hints else "")
 
 
+# Connection problems the user's proxy can help with. Not "blocked", "proxy", "timeout" or 403 on their own:
+# those words also appear in copyright blocks, settings names and anti-bot refusals.
 NET_ERRORS = (
     "failed to resolve", "getaddrinfo", "name or service not known", "nodename nor servname", "no address associated",
     "temporary failure in name resolution", "connection refused", "connection reset", "connection aborted",
-    "remote end closed", "timed out", "timeout", "network is unreachable", "unable to connect", "eof occurred",
-    "ssl: ", "certificate verify failed", "not available in your country", "geo restrict", "geo-restrict",
-    "blocked", "http error 451", "http error 403: forbidden", "proxy",
+    "remote end closed connection", "timed out", "connecttimeout", "readtimeout", "network is unreachable",
+    "unable to connect", "eof occurred in violation of protocol", "[ssl:", "sslerror", "certificate verify failed",
+    "not available in your country", "not made this video available in your country", "geo restrict",
+    "geo-restrict", "geoblocked", "http error 451", "tunnel connection failed", "proxyerror",
+    "unable to connect to proxy",
 )
 
 
@@ -983,10 +1167,8 @@ def last_download(key):
     if not key:
         return None
     with HISTORY_LOCK:
-        for h in reversed(HISTORY):
-            if h.get("key") == key:
-                return h
-    return None
+        r = HISTORY.execute("SELECT * FROM history WHERE key=? ORDER BY n DESC LIMIT 1", (key,)).fetchone()
+    return _history_row(r) if r else None
 
 
 # ---------------------------------------------------------------- info
@@ -1165,10 +1347,11 @@ def record_download(ydl, info, job):
         "site": info.get("extractor_key"), "source": job.get("source_label") or "", "clip": job.get("clip") or "",
         "method": job.get("method_now") or "مباشر",
     }
+    history_add(entry)
+    if key:
+        job.setdefault("done_keys", []).append(key)  # a paused list resumes after these
     with HISTORY_LOCK:
-        HISTORY.append(entry)
-        append_line(HISTORY_FILE, json.dumps(entry, ensure_ascii=False))
-        if key and key not in ARCHIVE and not key.startswith(("generic ", "html5mediaembed ")):
+        if key and key not in ARCHIVE:
             ARCHIVE.add(key)
             append_line(ARCHIVE_FILE, key)
     if key and job.get("sub_id"):
@@ -1262,11 +1445,16 @@ def build_download_opts(req, job, logger):
         opts["match_filter"] = match_filter_func("!is_live & live_status!=?is_upcoming & live_status!=?is_live")
 
     # --- skip what was downloaded before
-    if req.get("skip"):
-        archive = set(ARCHIVE)
+    if req.get("skip") or req.get("_done_keys"):
+        archive = set(ARCHIVE) if req.get("skip") else set()
         if req.get("sub_id"):
             archive |= read_set(sub_archive_path(req["sub_id"]))
+        archive |= set(req.get("_done_keys") or ())  # a paused list continues after what it already finished
         opts["download_archive"] = archive  # a set: yt-dlp checks it but we write the files ourselves
+    if req.get("_break_existing"):
+        # a channel, newest first: read until the first video already downloaded, however many are new
+        opts["break_on_existing"] = True
+        opts["break_per_url"] = True
 
     final_ext = None
     if kind == "audio":
@@ -1399,9 +1587,7 @@ def run_gallery_job(job, req, flags):
                  "quality": f"معرض · {len(files)} ملف", "size": sum(os.path.getsize(f) for f in files if os.path.exists(f)),
                  "date": time.time(), "uploader": None, "duration": None, "site": gallery_site(url) or site_of(url),
                  "source": job.get("source_label") or "", "clip": "", "method": job.get("method_now") or "gallery-dl"}
-        with HISTORY_LOCK:
-            HISTORY.append(entry)
-            append_line(HISTORY_FILE, json.dumps(entry, ensure_ascii=False))
+        history_add(entry)
         with JOBS_LOCK:
             job["outdir"] = folder
     return 0 if proc.returncode == 0 or files else proc.returncode
@@ -1454,7 +1640,8 @@ def next_step(job, req, flags, failed_text, empty, alts):
         return "_no_accel", True, "تعذّر التسريع على هذا الجهاز — إكمال التنزيل بالطريقة العادية…"
     if kind != "gallery" and "_impersonate" not in flags and IMPERSONATE and is_block_error(failed_text):
         return "_impersonate", True, "الموقع رفض الاتصال — إعادة المحاولة بانتحال بصمة متصفح حقيقي…"
-    if "_use_cookies" not in flags and is_auth_error(failed_text) and ext_cookies_for(url):
+    still_refused = is_block_error(failed_text) and ("_impersonate" in flags or not IMPERSONATE)
+    if "_use_cookies" not in flags and (is_auth_error(failed_text) or still_refused) and ext_cookies_for(url):
         return "_use_cookies", True, "الموقع يطلب تسجيل الدخول — إعادة المحاولة بكوكيز المتصفح…"
     if (kind not in ("file", "gallery") and "_gallery" not in flags and not flags.get("_alt_stream")
             and (empty or is_no_media(failed_text) or is_block_error(failed_text)) and gallery_site(url)):
@@ -1472,6 +1659,10 @@ def run_job(job_id):
 
     def check_cancel():
         if job.get("cancel"):
+            if job.get("pause") and job.get("_pause_at") and time.time() - job["_pause_at"] < 20:
+                return  # pausing: let the pieces already in flight finish, so they are kept for the resume
+            if job.get("pause"):
+                job["_pause_at"] = time.time()
             raise Cancelled()
 
     def progress_hook(d):
@@ -1510,6 +1701,7 @@ def run_job(job_id):
     try:
         flags, crash, code = {}, None, 0
         job["_thread"] = threading.get_ident()
+        TMP_COOKIE_JOBS[job["_thread"]] = job
         attempts = job.setdefault("attempts", [])
         alts = [a for a in (req.get("alt_streams") or []) if a.get("url") and a["url"] != req["url"]][:3]
         if req.get("live"):
@@ -1538,7 +1730,7 @@ def run_job(job_id):
                     opts["postprocessor_hooks"] = [pp_hook]
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.add_post_processor(HistoryPP(ydl, job), when="after_move")
-                        code = ydl.download([attempt_req["url"]])
+                        code = ydl.download([attempt_req["url"], *(attempt_req.get("extra_urls") or [])])
             except Cancelled:
                 raise
             except KeyboardInterrupt:
@@ -1613,10 +1805,101 @@ def run_job(job_id):
                 job.update(status="error", stage="فشل", error=clean_err(e), speed=None, eta=None)
     finally:
         job["finished"] = time.time()
+        TMP_COOKIE_JOBS.pop(job.get("_thread"), None)
+        drop_tmp_files(job)
         if req.get("sub_id") and job["status"] != PAUSED:
             sub_finished(req["sub_id"], job)
         with QUEUE:
             QUEUE.notify_all()
+
+
+def pause_job(j):
+    if j and j["status"] not in FINISHED and j["status"] != PAUSED and not j.get("live") and not j.get("gallery"):
+        j["pause"] = True
+        j["cancel"] = True
+        if j["status"] == "queued":
+            j.update(status=PAUSED, stage="متوقف مؤقتاً")
+        return True
+    return False
+
+
+def resume_job(j):
+    if j and j["status"] == PAUSED:
+        if j.get("many"):
+            j["_req"]["_done_keys"] = list(dict.fromkeys((j["_req"].get("_done_keys") or []) + (j.get("done_keys") or [])))
+        j.pop("_pause_at", None)
+        j.update(status="queued", stage="في الطابور — سيكمل من حيث توقف", cancel=False, pause=False)
+        return True
+    return False
+
+
+def pause_all():
+    with QUEUE:
+        n = sum(pause_job(j) for j in list(JOBS.values()))
+    return n
+
+
+def resume_all():
+    with QUEUE:
+        n = sum(resume_job(j) for j in list(JOBS.values()))
+        QUEUE.notify_all()
+    return n
+
+
+# ---------------------------------------------------------------- the queue survives closing the app
+SAVED_JOB_KEYS = ("id", "title", "url", "created", "label", "source", "source_label", "sub_id", "many", "done_keys",
+                  "done_count")
+
+
+def _clean_req(req):
+    r = {k: v for k, v in req.items() if k not in ("cookies", "page_cookies")}
+    if isinstance(r.get("headers"), dict):
+        r["headers"] = {k: v for k, v in r["headers"].items() if k.lower() not in ("cookie", "authorization")}
+    return r
+
+
+def save_queue():
+    with JOBS_LOCK:
+        items = []
+        for j in JOBS.values():
+            if j["status"] in FINISHED or j.get("live") or j.get("cancel") and not j.get("pause"):
+                continue
+            d = {k: j.get(k) for k in SAVED_JOB_KEYS}
+            d["paused"] = j["status"] == PAUSED or bool(j.get("pause"))
+            d["req"] = _clean_req(j["_req"])
+            if j.get("many"):
+                d["req"]["_done_keys"] = list(dict.fromkeys((d["req"].get("_done_keys") or []) + (j.get("done_keys") or [])))
+            items.append(d)
+    data = json.dumps(items, ensure_ascii=False)
+    if data != QUEUE_STATE.get("last"):
+        tmp = QUEUE_FILE.with_suffix(".tmp")
+        tmp.write_text(data, encoding="utf-8")
+        private_file(tmp)
+        tmp.replace(QUEUE_FILE)
+        QUEUE_STATE["last"] = data
+
+
+QUEUE_STATE = {}
+
+
+def restore_queue():
+    """Downloads that were waiting, paused or running when the app closed come back: running ones continue where
+    their partial files stopped, paused ones stay paused."""
+    items = load_json(QUEUE_FILE, [])
+    with QUEUE:
+        for d in items if isinstance(items, list) else []:
+            if not d.get("id") or d["id"] in JOBS or not (d.get("req") or {}).get("url"):
+                continue
+            j = {k: d.get(k) for k in SAVED_JOB_KEYS if d.get(k) is not None}
+            j.update(_req=d["req"], percent=0, restored=True)
+            if d.get("paused"):
+                j.update(status=PAUSED, stage="متوقف مؤقتاً — من الجلسة السابقة")
+            else:
+                j.update(status="queued", stage="في الطابور — يكمل من الجلسة السابقة")
+            JOBS[d["id"]] = j
+        QUEUE.notify_all()
+    if items:
+        log(f"[queue] restored {len(items)} download(s) from the last session")
 
 
 def new_job(req, label="", source="single", source_label=""):
@@ -1640,6 +1923,10 @@ def new_job(req, label="", source="single", source_label=""):
 
 def scheduler_loop():
     while True:
+        try:
+            save_queue()
+        except Exception as e:  # noqa: BLE001
+            log(f"[queue] not saved: {e}")
         with QUEUE:
             QUEUE.wait(timeout=2)
             running = sum(1 for j in JOBS.values() if j["status"] in RUNNING)
@@ -1689,6 +1976,36 @@ def normalize_sub_url(url):
     return url, False
 
 
+def channel_tab(url, tab):
+    return re.sub(r"/(videos|shorts|streams)/?$", "", url.rstrip("/")) + "/" + tab
+
+
+def seed_keys(url, limit=300):
+    """Everything already on a channel tab, so following it only downloads what comes later."""
+    opts = base_opts({"playlist": True})
+    opts.update(extract_flat="in_playlist", playlistend=limit)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return [k for k in (archive_key(ydl, e) for e in (info.get("entries") or []) if e) if k]
+    except Exception as e:  # noqa: BLE001  (a channel without Shorts or streams has no such tab)
+        log(f"[subs] {url}: {e}")
+        return []
+
+
+def sub_set_tabs(sub, shorts=None, streams=None):
+    """Turn following a channel's Shorts / live streams on or off; turning one on skips what is already there."""
+    for tab, on in (("shorts", shorts), ("streams", streams)):
+        if on is None or not sub.get("channel"):
+            continue
+        if on and not sub.get(tab):
+            keys = seed_keys(channel_tab(sub["url"], tab))
+            if keys:
+                with open(sub_archive_path(sub["id"]), "a", encoding="utf-8") as f:
+                    f.write("".join(k + "\n" for k in keys))
+        sub[tab] = bool(on)
+
+
 def sub_add(req):
     url, is_channel = normalize_sub_url(req.get("url") or "")
     if not url.startswith("http"):
@@ -1726,6 +2043,9 @@ def sub_add(req):
     with SUBS_LOCK:
         SUBS.append(sub)
         save_subs()
+    sub_set_tabs(sub, shorts=bool(req.get("shorts")), streams=bool(req.get("streams")))
+    with SUBS_LOCK:
+        save_subs()
     if first_n:
         sub_check(sid)
     else:
@@ -1752,7 +2072,9 @@ def sub_check(sid):
             "skip": True, "sub_id": sid, "folder": sub["title"], "title": f"متابعة: {sub['title']}", "meta": True,
         }
         if sub.get("channel"):
-            req["playlistend"] = max(15, int(sub.get("first_n") or 0))
+            req["playlistend"] = 300          # safety cap; reading stops at the first video already downloaded
+            req["_break_existing"] = True
+            req["extra_urls"] = [channel_tab(sub["url"], t) for t in ("shorts", "streams") if sub.get(t)]
         sub["first_n"] = 0
     q = "صوت" if sub["preset"] == "audio" else ("أفضل جودة" if sub["preset"] == "best" else f"حتى {sub['preset']}p")
     return new_job(req, label=f"متابعة · {q}", source="sub", source_label=f"متابعة: {sub['title']}")
@@ -1855,6 +2177,75 @@ def set_autostart(on):
 
 
 # ---------------------------------------------------------------- misc
+def native_host_path():
+    """The program the browser starts to talk to the app. The installed app answers itself; the Python version
+    gets a small launcher script."""
+    if FROZEN:
+        return sys.executable
+    d = APP_DATA / "native"
+    d.mkdir(parents=True, exist_ok=True)
+    if SYSTEM == "Windows":
+        f = d / "mo-native-host.bat"
+        f.write_text(f'@echo off\r\n"{sys.executable}" "{os.path.abspath(__file__)}" %*\r\n', encoding="utf-8")
+    else:
+        f = d / "mo-native-host.sh"
+        f.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{os.path.abspath(__file__)}" "$@"\n', encoding="utf-8")
+        f.chmod(0o755)
+    return str(f)
+
+
+CHROMIUM_DIRS = {  # browser -> where it looks for native messaging hosts
+    "Darwin": ["Google/Chrome", "Google/Chrome Beta", "Microsoft Edge", "BraveSoftware/Brave-Browser", "Chromium",
+               "Vivaldi", "Arc/User Data"],
+    "Linux": ["google-chrome", "google-chrome-beta", "microsoft-edge", "BraveSoftware/Brave-Browser", "chromium",
+              "vivaldi", "google-chrome-for-testing"],
+}
+WIN_REG_KEYS = [r"Software\Google\Chrome\NativeMessagingHosts", r"Software\Microsoft\Edge\NativeMessagingHosts",
+                r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts", r"Software\Chromium\NativeMessagingHosts",
+                r"Software\Vivaldi\NativeMessagingHosts"]
+
+
+def register_native_host():
+    """Let the browser extension start the app without the browser's "Open MO Downloader?" prompt."""
+    try:
+        path = native_host_path()
+        chrome = {"name": NATIVE_HOST, "description": APP_NAME, "path": path, "type": "stdio",
+                  "allowed_origins": [f"chrome-extension://{EXT_ID_CHROME}/"]}
+        firefox = {"name": NATIVE_HOST, "description": APP_NAME, "path": path, "type": "stdio",
+                   "allowed_extensions": [EXT_ID_FIREFOX]}
+        done = []
+        if SYSTEM == "Windows":
+            import winreg
+            d = APP_DATA / "native"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "chrome.json").write_text(json.dumps(chrome, indent=2), encoding="utf-8")
+            (d / "firefox.json").write_text(json.dumps(firefox, indent=2), encoding="utf-8")
+            for key, f in [(k, "chrome.json") for k in WIN_REG_KEYS] + [(r"Software\Mozilla\NativeMessagingHosts", "firefox.json")]:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key + "\\" + NATIVE_HOST) as h:
+                    winreg.SetValueEx(h, "", 0, winreg.REG_SZ, str(d / f))
+                done.append(key.split("\\")[1])
+        else:
+            if SYSTEM == "Darwin":
+                root = Path.home() / "Library" / "Application Support"
+                targets = [root / b / "NativeMessagingHosts" for b in CHROMIUM_DIRS["Darwin"] if (root / b).exists()]
+                ff = root / "Mozilla" / "NativeMessagingHosts"
+            else:
+                root = Path.home() / ".config"
+                targets = [root / b / "NativeMessagingHosts" for b in CHROMIUM_DIRS["Linux"] if (root / b).exists()]
+                ff = Path.home() / ".mozilla" / "native-messaging-hosts"
+            for t in targets:
+                t.mkdir(parents=True, exist_ok=True)
+                (t / f"{NATIVE_HOST}.json").write_text(json.dumps(chrome, indent=2), encoding="utf-8")
+                done.append(t.parent.name)
+            if ff.parent.exists():
+                ff.mkdir(parents=True, exist_ok=True)
+                (ff / f"{NATIVE_HOST}.json").write_text(json.dumps(firefox, indent=2), encoding="utf-8")
+                done.append("Firefox")
+        log(f"[native] browser helper registered for: {', '.join(done) or 'no browser found'}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[native] browser helper not registered: {e}")
+
+
 def open_path(path, select=False):
     p = Path(path)
     if not p.exists():
@@ -1870,25 +2261,37 @@ def open_path(path, select=False):
         subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
 
 
-def history_query(q="", limit=300):
-    q = (q or "").strip().lower()
-    with HISTORY_LOCK:
-        items = list(reversed(HISTORY))
+def history_query(q="", limit=100, offset=0):
+    """One page of the history, newest first; q searches title, channel, site, link and source."""
+    q = (q or "").strip()
+    where, args = "", []
     if q:
-        items = [h for h in items if q in " ".join(str(h.get(k) or "") for k in ("title", "uploader", "site", "url", "source")).lower()]
-    return {"total": len(HISTORY), "count": len(items), "items": items[:limit]}
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where = " WHERE " + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in ("title", "uploader", "site", "url", "source"))
+        args = [like] * 5
+    limit, offset = max(1, min(500, int(limit))), max(0, int(offset))
+    with HISTORY_LOCK:
+        total = HISTORY.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+        count = HISTORY.execute("SELECT COUNT(*) FROM history" + where, args).fetchone()[0] if q else total
+        rows = HISTORY.execute(f"SELECT * FROM history{where} ORDER BY n DESC LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
+    items = [_history_row(r) for r in rows]
+    return {"total": total, "count": count, "items": items, "offset": offset, "more": offset + len(items) < count}
 
 
 def history_delete(key=None, date=None, everything=False):
-    global HISTORY, ARCHIVE
+    global ARCHIVE
     with HISTORY_LOCK:
         if everything:
-            HISTORY, ARCHIVE = [], set()
+            HISTORY.execute("DELETE FROM history")
+            ARCHIVE = set()
         else:
-            HISTORY = [h for h in HISTORY if not (h.get("key") == key and (date is None or h.get("date") == date))]
-            if key and not any(h.get("key") == key for h in HISTORY):
+            if date is None:
+                HISTORY.execute("DELETE FROM history WHERE key=?", (key,))
+            else:
+                HISTORY.execute("DELETE FROM history WHERE key=? AND abs(date-?)<0.001", (key, float(date)))
+            if key and not HISTORY.execute("SELECT 1 FROM history WHERE key=? LIMIT 1", (key,)).fetchone():
                 ARCHIVE.discard(key)
-        HISTORY_FILE.write_text("".join(json.dumps(h, ensure_ascii=False) + "\n" for h in HISTORY), encoding="utf-8")
+        HISTORY.commit()
         ARCHIVE_FILE.write_text("".join(k + "\n" for k in ARCHIVE), encoding="utf-8")
     return {"ok": True}
 
@@ -2004,7 +2407,7 @@ def proxy_test(proxy):
 
 
 # ---------------------------------------------------------------- the app's own window
-UI = {"win": None, "base": None, "gui": None}
+UI = {"win": None, "base": None, "gui": None, "tray": None}
 SELFTEST = os.environ.get("MO_SELFTEST")  # CI: open the window, check the page really loaded, then quit
 
 
@@ -2080,6 +2483,112 @@ def _mac_reopen_hook():
         log(f"[window] dock reopen hook not installed: {e}")
 
 
+TRAY_TEXT = {"show": "إظهار MO Downloader", "pause": "إيقاف مؤقت للكل", "resume": "استئناف الكل", "quit": "خروج"}
+
+
+def _tray_quit():
+    save_queue()  # what is still downloading continues at the next start
+    quit_app()
+
+
+def start_windows_tray():
+    """An icon next to the clock while the app runs (also when its window is hidden): show / pause all / quit."""
+    pystray = ensure("pystray", required=False)
+    pil = ensure("pillow", "PIL", required=False)
+    if not pystray or not pil:
+        return None
+    import io
+    from PIL import Image
+    image = Image.open(io.BytesIO(LOGO_PNG)).convert("RGBA").resize((64, 64))
+    menu = pystray.Menu(
+        pystray.MenuItem(TRAY_TEXT["show"], lambda *a: show_window(), default=True),
+        pystray.MenuItem(TRAY_TEXT["pause"], lambda *a: pause_all()),
+        pystray.MenuItem(TRAY_TEXT["resume"], lambda *a: resume_all()),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(TRAY_TEXT["quit"], lambda icon, item: (icon.stop(), _tray_quit())),
+    )
+    icon = pystray.Icon("MO Downloader", image, APP_NAME, menu)
+    threading.Thread(target=icon.run, daemon=True).start()
+    UI["tray"] = icon
+    return icon
+
+
+MAC_STATUS = {}
+
+
+def start_mac_status_item():
+    """The same menu in the macOS menu bar. Must run on the main thread."""
+    import AppKit
+    import objc
+    from Foundation import NSObject
+    if "cls" not in MAC_STATUS:
+        class MOStatusTarget(NSObject):
+            def show_(self, sender):
+                threading.Thread(target=show_window, daemon=True).start()
+
+            def pauseAll_(self, sender):
+                threading.Thread(target=pause_all, daemon=True).start()
+
+            def resumeAll_(self, sender):
+                threading.Thread(target=resume_all, daemon=True).start()
+
+            def quit_(self, sender):
+                threading.Thread(target=_tray_quit, daemon=True).start()
+        MAC_STATUS["cls"] = MOStatusTarget
+    target = MAC_STATUS["cls"].alloc().init()
+    item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(AppKit.NSVariableStatusItemLength)
+    data = AppKit.NSData.dataWithBytes_length_(LOGO_PNG, len(LOGO_PNG))
+    img = AppKit.NSImage.alloc().initWithData_(data)
+    img.setSize_((18, 18))
+    item.button().setImage_(img)
+    item.button().setToolTip_(APP_NAME)
+    menu = AppKit.NSMenu.alloc().init()
+    for title, sel in ((TRAY_TEXT["show"], "show:"), (TRAY_TEXT["pause"], "pauseAll:"), (TRAY_TEXT["resume"], "resumeAll:"),
+                       (None, None), (TRAY_TEXT["quit"], "quit:")):
+        if title is None:
+            menu.addItem_(AppKit.NSMenuItem.separatorItem())
+            continue
+        mi = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+        mi.setTarget_(target)
+        menu.addItem_(mi)
+    item.setMenu_(menu)
+    MAC_STATUS.update(item=item, target=target, menu=menu)  # keep them alive
+    UI["tray"] = item
+    return item
+
+
+def start_tray():
+    try:
+        if SYSTEM == "Windows":
+            start_windows_tray()
+        elif SYSTEM == "Darwin":
+            _on_main_thread(start_mac_status_item)
+    except Exception as e:  # noqa: BLE001
+        log(f"[tray] icon not shown: {e}")
+
+
+def _selftest_dock_reopen(win):
+    """CI: hide the window, then send the app the same message macOS sends when its Dock icon is clicked."""
+    import AppKit
+
+    def visible():
+        return any(w.isVisible() and str(w.title()) == APP_NAME for w in AppKit.NSApplication.sharedApplication().windows())
+    win.hide()
+    time.sleep(1.5)
+    if visible():
+        return "FAIL(still-visible)"
+
+    def click_dock():
+        app = AppKit.NSApplication.sharedApplication()
+        app.delegate().applicationShouldHandleReopen_hasVisibleWindows_(app, False)
+    _on_main_thread(click_dock)
+    for _ in range(16):
+        time.sleep(0.5)
+        if visible():
+            return "OK"
+    return "FAIL(not-shown)"
+
+
 def window_wanted():
     return SETTINGS.get("ui", "window") == "window" and not os.environ.get("MD_NO_WINDOW")
 
@@ -2098,6 +2607,13 @@ def run_window(url, hidden):
         # downloads running, or the app is meant to stay on (started with the computer): hide, don't quit
         if not SELFTEST and (busy() or BACKGROUND or SETTINGS.get("autostart")):
             threading.Thread(target=win.hide, daemon=True).start()
+            tray = UI.get("tray")
+            if SYSTEM == "Windows" and tray is not None and not UI.get("told_tray"):
+                UI["told_tray"] = True
+                try:
+                    tray.notify("ما زال يعمل — أيقونته بجانب الساعة.", APP_NAME)
+                except Exception:  # noqa: BLE001
+                    pass
             return False
         return True
     win.events.closing += on_closing
@@ -2114,7 +2630,10 @@ def run_window(url, hidden):
                 except Exception:  # noqa: BLE001
                     pass
                 time.sleep(1)
-            Path(SELFTEST).write_text(f"{'OK' if ok else 'FAIL'} gui={UI.get('gui')} title={title!r}\n", encoding="utf-8")
+            extra = f" tray={'OK' if UI.get('tray') is not None else 'none'}"
+            if ok and SYSTEM == "Darwin":
+                extra += " reopen=" + _selftest_dock_reopen(win)
+            Path(SELFTEST).write_text(f"{'OK' if ok else 'FAIL'} gui={UI.get('gui')} title={title!r}{extra}\n", encoding="utf-8")
             win.destroy()
         win.events.loaded += lambda: threading.Thread(target=check, daemon=True).start()
 
@@ -2123,7 +2642,12 @@ def run_window(url, hidden):
     gui = os.environ.get("MO_GUI") or ("edgechromium" if SYSTEM == "Windows" else "cocoa" if SYSTEM == "Darwin" else "qt")
     UI["gui"] = gui or "native"
     (APP_DATA / "webview").mkdir(parents=True, exist_ok=True)
-    webview.start(gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"))
+    webview.start(start_tray, gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"))
+    if UI.get("tray") is not None and SYSTEM == "Windows":
+        try:
+            UI["tray"].stop()
+        except Exception:  # noqa: BLE001
+            pass
     return True
 
 
@@ -2299,7 +2823,7 @@ def ext_formats(b):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "MODownloader/2.5"
+    server_version = "MODownloader/" + APP_VERSION
 
     def log_message(self, *_):
         pass
@@ -2428,7 +2952,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/sites":
             return self._send(200, {"sites": supported_sites()})
         if u.path == "/api/history":
-            return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 300)))
+            return self._send(200, history_query(qs.get("q"), int(qs.get("limit") or 100), int(qs.get("offset") or 0)))
         if u.path == "/api/subs":
             with SUBS_LOCK:
                 return self._send(200, {"subs": SUBS, "hours": SETTINGS.get("check_hours")})
@@ -2484,20 +3008,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "ffmpeg": stop_live(j)})
             if p == "/api/pause":
                 with QUEUE:
-                    j = JOBS.get(req.get("id"))
-                    if j and j["status"] not in FINISHED and j["status"] != PAUSED:
-                        j["pause"] = True
-                        j["cancel"] = True
-                        if j["status"] == "queued":
-                            j.update(status=PAUSED, stage="متوقف مؤقتاً")
+                    pause_job(JOBS.get(req.get("id")))
                 return self._send(200, {"ok": True})
             if p == "/api/resume":
                 with QUEUE:
-                    j = JOBS.get(req.get("id"))
-                    if j and j["status"] == PAUSED:
-                        j.update(status="queued", stage="في الطابور — سيكمل من حيث توقف", cancel=False, pause=False)
-                        QUEUE.notify_all()
+                    resume_job(JOBS.get(req.get("id")))
+                    QUEUE.notify_all()
                 return self._send(200, {"ok": True})
+            if p == "/api/pause_all":
+                return self._send(200, {"ok": True, "paused": pause_all()})
+            if p == "/api/resume_all":
+                return self._send(200, {"ok": True, "resumed": resume_all()})
             if p == "/api/cancel_all":
                 with JOBS_LOCK:
                     for j in JOBS.values():
@@ -2545,6 +3066,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not text.lstrip().startswith("#"):
                     text = "# Netscape HTTP Cookie File\n" + text
                 COOKIE_FILE.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
+                private_file(COOKIE_FILE)
                 n = sum(1 for ln in text.splitlines() if ln.count("\t") >= 6)
                 return self._send(200, {"ok": True, "has": True, "count": n})
             if p == "/api/settings":
@@ -2599,6 +3121,8 @@ class Handler(BaseHTTPRequestHandler):
                     for k in ("enabled", "preset", "container", "audio_convert", "outdir"):
                         if k in req:
                             s[k] = req[k]
+                sub_set_tabs(s, shorts=req.get("shorts"), streams=req.get("streams"))
+                with SUBS_LOCK:
                     save_subs()
                 return self._send(200, {"ok": True})
             if p == "/api/subs/delete":
@@ -2617,20 +3141,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def free_port(preferred):
-    for port in [preferred] + list(range(preferred + 1, preferred + 30)):
+    for port in range(preferred, preferred + PORT_SPAN):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("127.0.0.1", port))
                 return port
             except OSError:
                 continue
-    return 0
+    return 0  # none of the ten free: any port (the extension then learns it from PORT_FILE through its helper)
 
 
 def already_running(port):
     """If MO Downloader is already open (on any of the ports it may use), return that port."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    for p in range(port, port + 6):
+    for p in range(port, port + PORT_SPAN):
         try:
             with opener.open(f"http://127.0.0.1:{p}/api/ping", timeout=1.0) as r:
                 if json.loads(r.read()).get("app") == APP_NAME:
@@ -2674,6 +3198,12 @@ def main():
     port = free_port(DEFAULT_PORT)
     server = SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        PORT_FILE.write_text(str(server.server_address[1]))
+    except OSError:
+        pass
+    restore_queue()
+    threading.Thread(target=register_native_host, daemon=True).start()
     for target in (scheduler_loop, subs_loop, engine_update_check, fetch_aria2_windows):
         threading.Thread(target=target, daemon=True).start()
     print("=" * 60)
@@ -2763,6 +3293,7 @@ button:hover{border-color:var(--accent)}
 button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}
 button:disabled{opacity:.5;cursor:default}
 button.ghost{background:transparent} button.small{padding:4px 10px;font-size:13px}
+button.small.on{border-color:var(--accent);color:var(--accent)}
 button.danger{color:var(--bad)} button.danger.armed{background:var(--bad);color:#fff;border-color:var(--bad)}
 .msg{margin-top:12px;padding:10px 12px;border-radius:10px;white-space:pre-wrap;font-size:14px}
 .msg.err{background:var(--bad-soft);color:var(--bad)} .msg.info{background:var(--chip);color:var(--muted)}
@@ -3005,6 +3536,10 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <div class="opt"><label>صيغة الصوت (عند اختيار صوت فقط)</label><select id="saudio" class="audioSel"></select></div>
         <div class="opt"><label>مجلد الحفظ (يُنشأ داخله مجلد باسم القناة)</label><input type="text" id="soutdir" class="ltr"></div>
       </div>
+      <div class="row" style="margin-top:8px;gap:18px">
+        <label class="toggle"><input type="checkbox" id="sshorts"> المقاطع القصيرة (Shorts) أيضاً</label>
+        <label class="toggle"><input type="checkbox" id="sstreams"> البث المباشر المسجَّل أيضاً</label>
+      </div>
       <div class="go"><div class="pick" id="shint"></div>
         <button class="primary" id="sadd">متابعة</button></div>
       <div id="smsg" class="msg hidden"></div>
@@ -3025,6 +3560,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       <input type="text" id="hq" placeholder="ابحث بالعنوان أو القناة أو الموقع…" style="width:100%">
       <p class="sub" id="hcount" style="margin-top:6px"></p>
       <div class="list" id="hlist"></div>
+      <div class="go hidden" id="hmorebox" style="justify-content:center"><button class="small" id="hmore">عرض المزيد</button></div>
       <p class="help">السجل يمنع تكرار التنزيل في القوائم والدفعات والمتابعات. لإعادة تنزيل عنصر بتلك الطرق احذفه من السجل أولاً، أما التنزيل العادي من تبويب «تنزيل» فيعمل دائماً.</p>
     </section>
   </div>
@@ -3181,6 +3717,8 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     <div class="section-h"><h3>التنزيلات <span class="badge" id="jsum"></span></h3>
       <span class="row">
         <button class="small ghost" id="openfolder">فتح مجلد التنزيلات</button>
+        <button class="small ghost" id="pauseall">إيقاف مؤقت للكل</button>
+        <button class="small ghost" id="resumeall">استئناف الكل</button>
         <button class="small ghost" id="cancelall">إلغاء الكل</button>
         <button class="small ghost" id="clear">مسح المنتهي</button>
       </span>
@@ -3641,6 +4179,12 @@ async function loadSubs() {
         el("button", {class: "small", text: "فحص الآن", onclick: async () => { await api("/api/subs/check", {id: s.id}); poll(); loadSubs(); }}),
         el("button", {class: "small", text: s.enabled ? "إيقاف مؤقت" : "تفعيل",
           onclick: async () => { await api("/api/subs/update", {id: s.id, enabled: !s.enabled}); loadSubs(); }}),
+        s.channel ? el("button", {class: "small ghost" + (s.shorts ? " on" : ""), text: (s.shorts ? "✓ " : "") + "Shorts",
+          title: "متابعة المقاطع القصيرة لهذه القناة",
+          onclick: async (e) => { e.target.disabled = true; await api("/api/subs/update", {id: s.id, shorts: !s.shorts}); loadSubs(); }}) : null,
+        s.channel ? el("button", {class: "small ghost" + (s.streams ? " on" : ""), text: (s.streams ? "✓ " : "") + "البث",
+          title: "متابعة البث المباشر المسجَّل لهذه القناة",
+          onclick: async (e) => { e.target.disabled = true; await api("/api/subs/update", {id: s.id, streams: !s.streams}); loadSubs(); }}) : null,
         el("button", {class: "small ghost", text: "فتح المجلد", onclick: () => api("/api/open", {path: s.outdir})}),
         el("button", {class: "small ghost", text: "فتح الرابط", onclick: () => api("/api/open_url", {url: s.url})}));
       const del = el("button", {class: "small danger", text: "إلغاء المتابعة"});
@@ -3658,7 +4202,8 @@ $("sadd").onclick = async () => {
   $("sadd").disabled = true; showMsg("smsg", "جارٍ قراءة القناة…", "loading");
   try {
     const r = await api("/api/subs/add", { url, start: $("sstart").value, preset: p,
-      audio_convert: $("saudio").value, container: "mp4", outdir: $("soutdir").value.trim() });
+      audio_convert: $("saudio").value, container: "mp4", outdir: $("soutdir").value.trim(),
+      shorts: $("sshorts").checked, streams: $("sstreams").checked });
     showMsg("smsg", "✓ تمت متابعة «" + r.sub.title + "»." + ($("sstart").value === "new" ? " سيُنزَّل كل فيديو جديد تلقائياً." : " بدأ تنزيل آخر الفيديوهات."), "ok");
     $("surl").value = ""; loadSubs(); poll();
   } catch (e) { showMsg("smsg", e.message); }
@@ -3669,14 +4214,20 @@ $("scheckall").onclick = async () => { await api("/api/subs/check", {all: true})
 // ---------- history
 let hTimer = null;
 $("hq").addEventListener("input", () => { clearTimeout(hTimer); hTimer = setTimeout(loadHistory, 250); });
-async function loadHistory() {
+const H_PAGE = 100;
+let hShown = 0;
+async function loadHistory(more) {
   try {
-    const r = await api("/api/history?limit=300&q=" + encodeURIComponent($("hq").value));
+    const offset = more === true ? hShown : 0;
+    const r = await api("/api/history?limit=" + H_PAGE + "&offset=" + offset + "&q=" + encodeURIComponent($("hq").value));
     $("n-hist").textContent = r.total;
+    hShown = offset + r.items.length;
     $("hcount").textContent = r.total ? (r.count === r.total ? r.total + " تنزيل" : r.count + " من " + r.total) +
-      (r.count > r.items.length ? " (يُعرض أحدث " + r.items.length + ")" : "") : "";
-    const box = $("hlist"); box.textContent = "";
-    if (!r.items.length) { box.append(el("p", {class: "empty", text: r.total ? "لا نتائج." : "لم تنزّل شيئاً بعد."})); return; }
+      (r.count > hShown ? " (يُعرض أحدث " + hShown + ")" : "") : "";
+    $("hmorebox").classList.toggle("hidden", !r.more);
+    const box = $("hlist");
+    if (!offset) box.textContent = "";
+    if (!r.items.length && !offset) { box.append(el("p", {class: "empty", text: r.total ? "لا نتائج." : "لم تنزّل شيئاً بعد."})); return; }
     for (const h of r.items) {
       const del = el("button", {class: "small ghost danger", text: "حذف من السجل"});
       armed(del, async () => { await api("/api/history/delete", {key: h.key, date: h.date}); loadHistory(); });
@@ -3699,6 +4250,7 @@ async function loadHistory() {
   } catch (e) {}
 }
 armed($("hclear"), async () => { await api("/api/history/clear", {}); loadHistory(); });
+$("hmore").onclick = () => loadHistory(true);
 
 // ---------- jobs
 let pollTimer = null;
@@ -3753,7 +4305,7 @@ function renderJobs(jobs) {
     const running = ["queued", "starting", "downloading", "processing"].includes(j.status);
     if (running && j.live)
       acts.append(el("button", {class: "small", text: "⏹ إيقاف التسجيل وحفظه", onclick: () => api("/api/stop_live", {id: j.id}).then(poll)}));
-    else if (running && !j.many && !j.gallery)
+    else if (running && !j.gallery)
       acts.append(el("button", {class: "small", text: "⏸ إيقاف مؤقت", onclick: () => api("/api/pause", {id: j.id}).then(poll)}));
     if (j.status === "paused")
       acts.append(el("button", {class: "small", text: "▶ استئناف", onclick: () => api("/api/resume", {id: j.id}).then(poll)}));
@@ -3794,6 +4346,8 @@ $("download").onclick = download;
 $("pldownload").onclick = downloadPlaylist;
 $("clear").onclick = () => api("/api/clear", {}).then(poll);
 $("cancelall").onclick = () => api("/api/cancel_all", {}).then(poll);
+$("pauseall").onclick = () => api("/api/pause_all", {}).then(poll);
+$("resumeall").onclick = () => api("/api/resume_all", {}).then(poll);
 $("openfolder").onclick = () => api("/api/open", { path: S.settings.outdir });
 $("openData").onclick = () => api("/api/open", { path: S.settings.outdir });
 $("quit").onclick = async () => {

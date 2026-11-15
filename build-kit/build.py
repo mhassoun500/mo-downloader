@@ -35,16 +35,15 @@ def run(*cmd, **kw):
 
 
 def app_version():
-    for line in APP.read_text(encoding="utf-8").splitlines():
-        if line.startswith("APP_VERSION"):
-            return line.split("=")[1].strip().strip('"')
-    return "0"
+    """The one place the version is kept: the VERSION file at the top of the project."""
+    return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 def main():
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet", "pip")
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet",
-        "pyinstaller", "yt-dlp[default,curl-cffi]", "yt-dlp-ejs", "gallery-dl", "imageio-ffmpeg", "deno", "certifi", "pywebview")
+        "pyinstaller", "yt-dlp[default,curl-cffi]", "yt-dlp-ejs", "gallery-dl", "imageio-ffmpeg", "deno", "certifi", "pywebview",
+        *(["pystray", "pillow"] if SYSTEM == "Windows" else []))
     import importlib.metadata as md
     import deno as deno_pkg
     deno_bin = Path(deno_pkg.find_deno_bin())
@@ -89,7 +88,8 @@ def main():
     if SYSTEM == "Windows":
         args += ["--windowed", "--icon", ICO,
                  "--hidden-import", "webview.platforms.winforms", "--hidden-import", "webview.platforms.edgechromium",
-                 "--hidden-import", "clr", "--collect-all", "clr_loader", "--collect-all", "pythonnet"]
+                 "--hidden-import", "clr", "--collect-all", "clr_loader", "--collect-all", "pythonnet",
+                 "--hidden-import", "pystray._win32", "--hidden-import", "PIL.Image"]
     elif SYSTEM == "Darwin":
         args += ["--windowed", "--icon", ICNS, "--osx-bundle-identifier", "local.mo.downloader", "--argv-emulation",
                  "--hidden-import", "webview.platforms.cocoa", "--hidden-import", "WebKit", "--hidden-import", "Quartz",

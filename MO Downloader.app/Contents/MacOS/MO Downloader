@@ -18,21 +18,21 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-# already open? just show it
-if curl -s -m 2 http://127.0.0.1:8765/api/ping | grep -q "MO Downloader"; then
-  case " $* " in *" --background "*) ;; *) open "http://127.0.0.1:8765/";; esac
-  exit 0
-fi
+# already open? let the app show its window (it checks ports 8765-8774 and answers the second launch itself)
+export MO_APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
 
-case " $* " in *" --background "*) ;; *) osascript -e 'display notification "Starting… (the first launch can take a minute)" with title "MO Downloader"' >/dev/null 2>&1;; esac
+# first run only: install what is missing. Opening is then immediate; the app itself keeps the engines
+# current in the background, once a day (it no longer waits for pip at every start).
+if ! "$PY" -c "import yt_dlp, gallery_dl, curl_cffi, imageio_ffmpeg, deno, webview" >/dev/null 2>&1; then
+case " $* " in *" --background "*) ;; *) osascript -e 'display notification "Installing the download engine… (first launch only, about a minute)" with title "MO Downloader"' >/dev/null 2>&1;; esac
 {
-  echo "=== $(date) — $PY"
+  echo "=== $(date) — $PY (first-run install)"
   "$PY" -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview 2>/dev/null \
    || "$PY" -m pip install -U --quiet --user "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview 2>/dev/null \
    || "$PY" -m pip install -U --quiet --break-system-packages "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview
 } >>"$LOG" 2>&1
+fi
 
-export MO_APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
 "$PY" "$HERE/mo_downloader.py" "$@" >>"$LOG" 2>&1
 code=$?
 if [ $code -ne 0 ]; then

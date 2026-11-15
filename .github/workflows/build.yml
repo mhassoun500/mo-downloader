@@ -105,6 +105,10 @@ jobs:
           if (!$p.HasExited) { $p.Kill() }
           if (Test-Path $env:MO_SELFTEST) { Get-Content $env:MO_SELFTEST } else { Get-Content "$env:USERPROFILE\.media_downloader\log.txt" -Tail 40; throw "no self-test result" }
           if (-not (Select-String -Path $env:MO_SELFTEST -Pattern "^OK")) { Get-Content "$env:USERPROFILE\.media_downloader\log.txt" -Tail 40; throw "window self-test failed" }
+          if (-not (Select-String -Path $env:MO_SELFTEST -Pattern "tray=OK")) { Get-Content "$env:USERPROFILE\.media_downloader\log.txt" -Tail 40; throw "no icon next to the clock" }
+          $k = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.mo.downloader"
+          if (-not (Test-Path $k)) { throw "browser helper not registered" }
+          $m = (Get-ItemProperty $k)."(default)"; Get-Content $m
 
       - name: Self-test the app window (macOS)
         if: runner.os == 'macOS'
@@ -115,6 +119,31 @@ jobs:
           kill $PID 2>/dev/null || true
           if [ -f "$MO_SELFTEST" ]; then cat "$MO_SELFTEST"; else tail -40 ~/.media_downloader/log.txt; exit 1; fi
           grep -q "^OK" "$MO_SELFTEST" || { tail -40 ~/.media_downloader/log.txt; exit 1; }
+          grep -q "tray=OK" "$MO_SELFTEST" || { echo "no menu-bar icon"; tail -40 ~/.media_downloader/log.txt; exit 1; }
+          grep -q "reopen=OK" "$MO_SELFTEST" || { echo "clicking the Dock icon did not bring the window back"; exit 1; }
+
+      - name: Browser helper (native messaging) answers and starts the app
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then APP="build-tmp/dist/MO Downloader/MO Downloader.exe";
+          else APP="build-tmp/dist/MO Downloader.app/Contents/MacOS/MO Downloader"; fi
+          python - "$APP" <<'PY'
+          import json, struct, subprocess, sys, time, urllib.request
+          app = sys.argv[1]
+          def ask(t):
+              raw = json.dumps({"type": t}).encode()
+              p = subprocess.run([app, "chrome-extension://kfiopiphhapdnaeibmhmdloghbnheeoo/"], input=struct.pack("<I", len(raw)) + raw,
+                                 capture_output=True, timeout=90)
+              n = struct.unpack("<I", p.stdout[:4])[0]
+              return json.loads(p.stdout[4:4 + n])
+          r = ask("ping"); print("ping (app closed):", r); assert r["app"] == "MO Downloader" and not r["port"]
+          r = ask("launch"); print("launch:", r); assert r["port"], "the helper did not start the app"
+          o = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          print(o.open(f"http://127.0.0.1:{r['port']}/api/ping", timeout=5).read())
+          o.open(urllib.request.Request(f"http://127.0.0.1:{r['port']}/api/shutdown", data=b"{}",
+                 headers={"X-MO-Ext": "1", "Content-Type": "application/json"}), timeout=10)
+          time.sleep(3)
+          PY
 
       - name: Check the bundled engines (yt-dlp, gallery-dl, browser impersonation)
         shell: bash
@@ -183,3 +212,17 @@ jobs:
       - run: python -m pip install --quiet "yt-dlp[default,curl-cffi]" yt-dlp-ejs gallery-dl
       - run: python src/make.py app/mo_downloader.py
       - run: python tests/run_tests.py
+
+  extension-tests:
+    # the browser extension inside an automated Chromium (tests/ext_test.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - run: python -m pip install --quiet "yt-dlp[default,curl-cffi]" yt-dlp-ejs gallery-dl playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python src/make.py app/mo_downloader.py
+      - run: python tests/ext_test.py

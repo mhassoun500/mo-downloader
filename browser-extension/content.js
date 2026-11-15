@@ -3,7 +3,7 @@
   if (window.__moDownloader) return;
   window.__moDownloader = true;
   // never on MO Downloader's own page
-  if (/^(127\.0\.0\.1|localhost)$/.test(location.hostname) && +location.port >= 8765 && +location.port <= 8770) return;
+  if (/^(127\.0\.0\.1|localhost)$/.test(location.hostname) && +location.port >= 8765 && +location.port <= 8774) return;
 
   const ext = globalThis.browser ?? chrome;
   const MIN_W = 220, MIN_H = 120, IMG_MIN = 180;
@@ -74,19 +74,44 @@
 
   let current = null, currentKind = "video", hideTimer = null, menuOpen = false;
 
-  const onScreen = (r) => r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+  // Only elements on screen are candidates: an IntersectionObserver keeps that short list up to date, so a mouse
+  // move checks a handful of elements instead of measuring every video and image of the page.
+  const seen = new Map(); // element -> its latest on-screen rectangle (only while visible)
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (en.isIntersecting) seen.set(en.target, en.boundingClientRect);
+      else seen.delete(en.target);
+    }
+  });
+  const watched = new WeakSet();
+  function watch(root) {
+    const list = root.querySelectorAll ? root.querySelectorAll("video, img") : [];
+    for (const el of [root, ...list]) {
+      if ((el.tagName === "VIDEO" || el.tagName === "IMG") && !watched.has(el)) { watched.add(el); io.observe(el); }
+    }
+  }
+  watch(document);
+  let watchTimer = null, pending = [];
+  new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) pending.push(n);
+    clearTimeout(watchTimer);
+    watchTimer = setTimeout(() => { const p = pending; pending = []; p.forEach(watch); }, 300);
+  }).observe(document.documentElement, { childList: true, subtree: true });
+
   function visibleVideos() {
     if (!opt.videoButton) return [];
-    return [...document.querySelectorAll("video")].filter((v) => {
+    return [...seen.keys()].filter((v) => {
+      if (v.tagName !== "VIDEO" || !v.isConnected) return false;
       const r = v.getBoundingClientRect();
-      return r.width >= MIN_W && r.height >= MIN_H && onScreen(r) && getComputedStyle(v).visibility !== "hidden";
+      return r.width >= MIN_W && r.height >= MIN_H && getComputedStyle(v).visibility !== "hidden";
     });
   }
   function visibleImages() {
     if (!opt.imageButton) return [];
-    return [...document.images].filter((im) => {
+    return [...seen.keys()].filter((im) => {
+      if (im.tagName !== "IMG" || !im.isConnected) return false;
       const r = im.getBoundingClientRect();
-      return r.width >= IMG_MIN && r.height >= IMG_MIN * 0.7 && onScreen(r) && /^https?:/.test(im.currentSrc || im.src || "");
+      return r.width >= IMG_MIN && r.height >= IMG_MIN * 0.7 && /^https?:/.test(im.currentSrc || im.src || "");
     });
   }
 
