@@ -149,9 +149,21 @@ jobs:
           assert h > 720, "only up to %sp offered" % h
           PY
 
+      # On a version tag the files go straight onto the Release (no storage quota there)
+      - name: Attach the files to the Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+
       - uses: actions/upload-artifact@v4
+        continue-on-error: ${{ startsWith(github.ref, 'refs/tags/') }}
         with:
           name: MO-Downloader-${{ matrix.os }}
+          retention-days: 7   # old builds expire so the storage quota is not hit again
           path: |
             dist/*.exe
             dist/*.dmg
@@ -171,16 +183,3 @@ jobs:
       - run: python -m pip install --quiet "yt-dlp[default,curl-cffi]" yt-dlp-ejs gallery-dl
       - run: python src/make.py app/mo_downloader.py
       - run: python tests/run_tests.py
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: out
-          merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: out/*
