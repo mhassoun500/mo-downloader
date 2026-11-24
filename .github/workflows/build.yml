@@ -125,6 +125,8 @@ jobs:
       - name: Opening files, replacing the Python version, shortcuts (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: python tests/win_open_test.py "build-tmp/dist/MO Downloader/MO Downloader.exe"
 
       - name: Browser helper (native messaging) answers and starts the app

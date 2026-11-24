@@ -7,6 +7,7 @@
 import json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Arabic file names in the CI log
 EXE = Path(sys.argv[1]).resolve()
 REPO = Path(__file__).resolve().parent.parent
 O = urllib.request.build_opener(urllib.request.ProxyHandler({}))
