@@ -185,6 +185,17 @@ jobs:
           assert h > 720, "only up to %sp offered" % h
           PY
 
+      - name: Automatic update of the built app (installs a "newer" copy by itself and reopens)
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python tests/ci_update_test.py "$(ls dist/*-Setup.exe | head -1)"
+          else
+            python tests/ci_update_test.py "$(ls dist/*.dmg | head -1)" "build-tmp/dist/MO Downloader.app"
+          fi
+
       # On a version tag the files go straight onto the Release (no storage quota there)
       - name: Attach the files to the Release
         if: startsWith(github.ref, 'refs/tags/')

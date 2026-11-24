@@ -507,6 +507,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     <section class="card">
       <h2>تحديث البرنامج</h2>
       <p class="sub" id="updMsg"></p>
+      <div class="checks"><label><input type="checkbox" id="updAuto"> تثبيت التحديثات تلقائياً (عندما لا يكون هناك تنزيل جارٍ)</label></div>
       <div class="go"><span class="pick"></span>
         <span class="row"><button class="small" id="updCheck">البحث عن تحديث</button>
           <button class="primary hidden" id="updInstall">تثبيت التحديث</button></span></div>
@@ -834,6 +835,7 @@ async function loadStatus() {
       $("setNotify").checked = s.settings.notify !== false; $("setClip").checked = !!s.settings.clipboard;
       $("setSub3d").value = s.settings.sub3d_cmd || ""; $("phOn").checked = !!s.settings.phone;
       $("phPin").value = s.settings.phone_pin || ""; $("updUrl").value = s.settings.update_url || "";
+      $("updAuto").checked = s.settings.auto_update !== false;
     }
     $("tplEx").textContent = s.tpl_example || "";
     phoneUI(s.phone);
@@ -1187,9 +1189,10 @@ function updUI(u) {
   u = u || {};
   $("updMsg").textContent = u.msg || ("الإصدار الحالي " + (S.status ? S.status.app : ""));
   $("updInstall").classList.toggle("hidden", u.state !== "ready");
-  $("updCheck").disabled = ["checking", "downloading"].includes(u.state);
-  if (["checking", "downloading"].includes(u.state)) setTimeout(loadStatus, 1500);
+  $("updCheck").disabled = ["checking", "downloading", "installing"].includes(u.state);
+  if (["checking", "downloading", "installing"].includes(u.state)) setTimeout(loadStatus, 1500);
 }
+$("updAuto").onchange = () => api("/api/settings", {auto_update: $("updAuto").checked}).then(() => toast("✓ تم الحفظ", true));
 $("updCheck").onclick = async () => { await api("/api/update_check", {}); setTimeout(loadStatus, 600); };
 $("updInstall").onclick = async () => { try { const r = await api("/api/update_install", {}); toast(r.msg, true); } catch (e) { toast(e.message); } };
 $("updUrlSave").onclick = async () => { try { await api("/api/settings", {update_url: $("updUrl").value.trim()}); toast("✓ تم الحفظ", true); }

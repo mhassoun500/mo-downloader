@@ -66,12 +66,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if path.startswith("/release/"):  # a stand-in for GitHub's "latest release" answer (self-update test)
             import hashlib, json
             kind = path[len("/release/"):].replace(".json", "")
-            data = open(os.path.join(ROOT, "clip.mp4"), "rb").read()
+            fname = "update.zip" if kind == "zip" else "clip.mp4"  # update.zip: a real newer app (written by the tests)
+            data = open(os.path.join(ROOT, fname), "rb").read()
             digest = hashlib.sha256(data).hexdigest() if kind != "bad" else "0" * 64
             rel = {"tag_name": "v1.0" if kind == "old" else "v9.9", "html_url": "http://127.0.0.1/release",
                    "body": "test release", "assets": [{"name": "MO-Downloader-9.9.zip", "size": len(data),
                    "digest": "sha256:" + digest,
-                   "browser_download_url": f"http://127.0.0.1:{self.server.server_address[1]}/files/clip.mp4"}]}
+                   "browser_download_url": f"http://127.0.0.1:{self.server.server_address[1]}/files/{fname}"}]}
             body = json.dumps(rel).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

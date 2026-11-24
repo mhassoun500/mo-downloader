@@ -201,6 +201,7 @@ DEFAULT_SETTINGS = {
     "sub3d_cmd": "",            # optional command for the 3D subtitle tool: {file} = the .srt file
     "update_url": "https://api.github.com/repos/mhassoun500/mo-downloader/releases/latest",
     "update_checked": 0,
+    "auto_update": True,        # install a downloaded update by itself as soon as nothing is downloading
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
 SETTINGS_LOCK = threading.Lock()
@@ -390,11 +391,7 @@ def T(text):
     if not re.search(f"[{_AR}]", long):
         return long
     full = one_pass(long, True)
-    return long if re.search(f"[{_AR}]", full) else full.replace(stripped, I18N_EN[stripped])
-    for k in _I18N_KEYS:
-        if k in text:
-            text = re.sub(f"(?<![{_AR}]){re.escape(k)}(?![{_AR}])", lambda m: I18N_EN[k], text)
-    return text
+    return long if re.search(f"[{_AR}]", full) else full
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -2525,26 +2522,140 @@ def update_check(download=True):
     return UPDATE
 
 
-def update_install():
+def _relaunch_cmd():
+    """How to open this same app again after it closes."""
+    args = ["--background"] if BACKGROUND else []
+    bundle = mac_bundle()
+    if SYSTEM == "Darwin" and bundle:
+        return ["open", "-n", bundle, *(["--args", *args] if args else [])]
+    return self_command(*args)
+
+
+def _restart_later(cmd):
+    """Start cmd once this app has quit and let go of its port (so it comes back on the same one)."""
+    import subprocess
+    port = SERVER.server_address[1] if SERVER else DEFAULT_PORT
+    if FROZEN and SYSTEM == "Darwin":
+        wait = (f"for i in $(seq 1 60); do curl -s -m 1 http://127.0.0.1:{port}/api/ping >/dev/null || break; sleep 0.5; done; "
+                "sleep 0.5; ")
+        subprocess.Popen(["/bin/sh", "-c", wait + " ".join(_sh_quote(c) for c in cmd)], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    py = ("import socket,subprocess,time\n"
+          "for _ in range(60):\n"
+          "    s=socket.socket()\n"
+          f"    busy=s.connect_ex(('127.0.0.1',{port}))==0\n"
+          "    s.close()\n"
+          "    if not busy: break\n"
+          "    time.sleep(0.5)\n"
+          "time.sleep(0.5)\n"
+          f"subprocess.Popen({cmd!r})\n")
+    kw = {"creationflags": 0x00000008 | 0x00000200 | NO_WINDOW} if SYSTEM == "Windows" else {"start_new_session": True}
+    subprocess.Popen([sys.executable, "-c", py], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, **kw)
+
+
+def _sh_quote(x):
+    return "'" + str(x).replace("'", "'\\''") + "'"
+
+
+def _install_mac_dmg(dmg):
+    """Replace this app with the one inside the downloaded .dmg (a file the app downloaded itself carries no
+    "downloaded from the internet" mark, so macOS opens the new copy without asking)."""
+    import subprocess
+    import tempfile
+    dest = mac_bundle()
+    if not dest:
+        raise ValueError("لم أجد مكان البرنامج لاستبداله.")
+    mnt = tempfile.mkdtemp(prefix="mo-update-")
+    subprocess.run(["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", mnt, dmg], check=True, capture_output=True)
+    try:
+        src = next((p for p in Path(mnt).glob("*.app")), None)
+        if not src:
+            raise ValueError("ملف التحديث لا يحتوي البرنامج.")
+        new, old = dest + ".new", dest + ".old"
+        shutil.rmtree(new, ignore_errors=True)
+        shutil.rmtree(old, ignore_errors=True)
+        subprocess.run(["ditto", str(src), new], check=True, capture_output=True)
+        os.rename(dest, old)
+        os.rename(new, dest)
+        shutil.rmtree(old, ignore_errors=True)
+    finally:
+        subprocess.run(["hdiutil", "detach", "-force", mnt], capture_output=True)
+
+
+def _install_source_zip(zf):
+    """The Python version: put the new mo_downloader.py from the release zip in place of this one."""
+    import zipfile
+    me = Path(__file__).resolve()
+    with zipfile.ZipFile(zf) as z:
+        name = next((n for n in z.namelist() if n.endswith("/app/mo_downloader.py") or n == "app/mo_downloader.py"), None)
+        if not name:
+            raise ValueError("ملف التحديث لا يحتوي البرنامج.")
+        data = z.read(name)
+    if b"APP_VERSION" not in data:
+        raise ValueError("ملف التحديث غير صالح.")
+    tmp = me.with_name(me.name + ".new")
+    tmp.write_bytes(data)
+    tmp.replace(me)
+
+
+def update_install(auto=False):
     import subprocess
     f = UPDATE.get("file")
     if UPDATE.get("state") != "ready" or not f or not os.path.exists(f):
         raise ValueError("لا يوجد تحديث جاهز.")
-    if f.endswith(".exe"):
-        save_queue()
-        subprocess.Popen([f, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"], creationflags=0x00000008)
-        threading.Thread(target=lambda: (time.sleep(1.5), quit_app()), daemon=True).start()
-        return {"ok": True, "msg": "يُثبَّت التحديث الآن وسيفتح البرنامج من جديد."}
-    open_path(f, play=True)  # a .dmg (drag the app into Applications) or the source .zip
-    return {"ok": True, "msg": "فُتح ملف التحديث — اسحب التطبيق إلى مجلد التطبيقات واستبدل القديم." if f.endswith(".dmg")
-            else "فُتح ملف التحديث."}
+    tag = UPDATE.get("latest")
+    log(f"[update] installing {tag} ({'automatic' if auto else 'by the user'}): {Path(f).name}")
+    save_queue()
+    UPDATE.update(state="installing", msg=f"جارٍ تثبيت الإصدار {tag}…")
+    try:
+        if f.endswith(".exe"):
+            # the installer closes this app, replaces it and opens it again (/RELAUNCH=1)
+            subprocess.Popen([f, "/VERYSILENT" if auto else "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"],
+                             creationflags=0x00000008)
+            threading.Thread(target=lambda: (time.sleep(1.5), quit_app()), daemon=True).start()
+            return {"ok": True, "msg": "يُثبَّت التحديث الآن وسيفتح البرنامج من جديد."}
+        if f.endswith(".dmg") and FROZEN and SYSTEM == "Darwin":
+            _install_mac_dmg(f)
+        elif f.endswith(".zip") and not FROZEN:
+            _install_source_zip(f)
+        else:
+            open_path(f, play=True)
+            UPDATE.update(state="ready", msg=f"الإصدار {tag} جاهز للتثبيت.")
+            return {"ok": True, "msg": "فُتح ملف التحديث."}
+    except Exception as e:  # noqa: BLE001
+        log(f"[update] install failed: {e}")
+        UPDATE.update(state="error", msg=f"تعذّر تثبيت التحديث: {e}")
+        raise ValueError(f"تعذّر تثبيت التحديث: {e}") from e
+    Path(f).unlink(missing_ok=True)
+    _restart_later(_relaunch_cmd())
+    threading.Thread(target=lambda: (time.sleep(0.8), quit_app()), daemon=True).start()
+    return {"ok": True, "msg": "ثُبّت التحديث — يُعاد فتح البرنامج الآن."}
+
+
+def auto_install_when_idle():
+    """Install a downloaded update by itself, but never in the middle of a download."""
+    while UPDATE.get("state") == "ready" and SETTINGS.get("auto_update", True):
+        if not busy():
+            notify(T("تحديث تلقائي"), f"MO Downloader {UPDATE.get('latest')} — " + T("يُثبَّت الآن ويُعاد فتح البرنامج."))
+            time.sleep(3)
+            if not busy():
+                try:
+                    update_install(auto=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+        time.sleep(30)
 
 
 def update_loop():
-    time.sleep(60)
+    time.sleep(float(os.environ.get("MO_UPDATE_DELAY", 60)))
     while True:
         if SETTINGS.get("update_url") and time.time() - float(SETTINGS.get("update_checked") or 0) > 86400:
-            update_check(download=FROZEN)
+            update_check(download=True)
+            if UPDATE.get("state") == "ready" and SETTINGS.get("auto_update", True):
+                auto_install_when_idle()
         time.sleep(3600)
 
 
@@ -3914,7 +4025,11 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/import":
                 return self._send(200, import_data(req.get("data"), set(req.get("parts") or ["settings", "subs", "history"])))
             if p == "/api/update_check":
-                threading.Thread(target=update_check, kwargs={"download": True}, daemon=True).start()
+                def check_then_install():
+                    update_check(download=True)
+                    if UPDATE.get("state") == "ready" and SETTINGS.get("auto_update", True) and req.get("auto", True):
+                        auto_install_when_idle()
+                threading.Thread(target=check_then_install, daemon=True).start()
                 return self._send(200, {"ok": True})
             if p == "/api/update_install":
                 return self._send(200, update_install())
@@ -4067,6 +4182,8 @@ class Handler(BaseHTTPRequestHandler):
                     if cmd and "{file}" not in cmd:
                         raise ValueError("أمر الترجمة ثلاثية الأبعاد يجب أن يحتوي {file} مكان ملف الترجمة.")
                     changed["sub3d_cmd"] = cmd
+                if "auto_update" in req:
+                    changed["auto_update"] = bool(req["auto_update"])
                 if "update_url" in req:
                     uu = str(req["update_url"] or "").strip()
                     if uu and not uu.startswith(("https://", "http://127.0.0.1", "http://localhost")):
@@ -4120,6 +4237,9 @@ class Handler(BaseHTTPRequestHandler):
 def free_port(preferred):
     for port in range(preferred, preferred + PORT_SPAN):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if SYSTEM != "Windows":
+                # like the server itself: a port whose old connections are still closing (just after a restart) is usable
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
                 return port

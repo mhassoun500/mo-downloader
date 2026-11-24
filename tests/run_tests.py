@@ -96,13 +96,13 @@ def wait_url(url, secs=40):
 
 
 class App:
-    def __init__(self, home, extra_env=None):
+    def __init__(self, home, extra_env=None, script=None):
         env = os.environ.copy()
-        env.update(extra_env or {})
         env.update(HOME=str(home), USERPROFILE=str(home), MD_PORT=str(APP_PORT), MD_NO_WINDOW="1", MD_NO_BROWSER="1",
                    NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
+        env.update(extra_env or {})
         self.log = open(home / "app.log", "w")
-        self.proc = subprocess.Popen([sys.executable, "-u", str(APP)], env=env, stdout=self.log, stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen([sys.executable, "-u", str(script or APP)], env=env, stdout=self.log, stderr=subprocess.STDOUT)
         self.base = None
         for _ in range(360):  # the app may pick the next free port; read it from its start-up line
             m = re.search(r"is running:\s+(http://127\.0\.0\.1:\d+)/", (home / "app.log").read_text(errors="replace"))
@@ -545,11 +545,51 @@ def run_27_tests(tmp):
         check("update: a file whose fingerprint doesn't match is rejected", u.get("state") == "error" and "البصمة" in (u.get("msg") or ""),
               u.get("msg"))
         app.api("/api/settings", {"update_url": SITE + "/release/new.json"})
-        app.api("/api/update_check", {})
+        app.api("/api/update_check", {"auto": False})
         u = wait_update()
         upd = home / ".media_downloader" / "updates" / "MO-Downloader-9.9.zip"
         check("update: a newer version is downloaded and checked", u.get("state") == "ready" and u.get("latest") == "9.9"
               and upd.exists() and upd.read_bytes() == (site / "clip.mp4").read_bytes(), u.get("msg"))
+
+        # --- automatic update: a copy of the app replaces itself with a newer version and starts again
+        import zipfile
+        newer = APP.read_text(encoding="utf-8").replace(f'APP_VERSION = "{app.api("/api/status")["app"]}"', 'APP_VERSION = "9.9"', 1)
+        with zipfile.ZipFile(site / "update.zip", "w") as z:
+            z.writestr("MO Downloader 9.9/app/mo_downloader.py", newer)
+        copy = tmp / "appcopy" / "app" / "mo_downloader.py"
+        copy.parent.mkdir(parents=True)
+        shutil.copy(APP, copy)
+        home_u = tmp / "home-update"
+        home_u.mkdir()
+        old = App(home_u, {"MD_PORT": "8955"}, script=copy)
+        port = int(old.base.rsplit(":", 1)[1])
+        old.api("/api/settings", {"update_url": SITE + "/release/zip.json"})
+        old.api("/api/update_check", {})
+        new, newport = None, None
+        for _ in range(120):
+            time.sleep(0.5)
+            for pp in range(port, port + 10):
+                try:
+                    p = json.loads(OPENER.open(f"http://127.0.0.1:{pp}/api/ping", timeout=0.5).read())
+                    if p.get("version") == "9.9":
+                        new, newport = p, pp
+                        break
+                except Exception:
+                    pass
+            if new:
+                break
+        check("automatic update: downloaded, installed and reopened as the new version", bool(new)
+              and old.proc.poll() is not None and 'APP_VERSION = "9.9"' in copy.read_text(encoding="utf-8"),
+              f"{new} · port {port} → {newport} · old process exit {old.proc.poll()}")
+        check("automatic update: back on the same port", newport == port, f"{port} → {newport}")
+        try:
+            tok = re.search(r'const TOKEN = "([^"]+)"', OPENER.open(f"http://127.0.0.1:{newport}/").read().decode()).group(1)
+            OPENER.open(urllib.request.Request(f"http://127.0.0.1:{newport}/api/shutdown", data=b"{}",
+                        headers={"X-Token": tok, "Content-Type": "application/json"}), timeout=5)
+        except Exception:
+            pass
+        if old.proc.poll() is None:
+            old.proc.kill()
 
         # --- English messages
         app.api("/api/settings", {"lang": "en"})
