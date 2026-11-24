@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "MO Downloader"
-APP_VERSION = "2.6"  # written by src/make.py from the VERSION file — change it there
+APP_VERSION = "2.7"  # written by src/make.py from the VERSION file — change it there
 FROZEN = bool(getattr(sys, "frozen", False))
 PROTOCOL = "mo-downloader"
 # started in the background (with the computer) or by the browser extension through mo-downloader://
@@ -188,6 +188,19 @@ DEFAULT_SETTINGS = {
     "ui": "window",             # window = the app's own window | browser = the default web browser
     "engine_channel": "stable", # stable | nightly (site fixes reach nightly builds first)
     "engine_checked": 0,
+    # 2.7
+    "lang": "ar",               # ar | en (the interface language)
+    "rate_limit_kb": 0,         # download speed limit in KB/s, 0 = none
+    "name_tpl": "",             # file name template, e.g. "{date} - {title}"; empty = "{title} [{id}] {quality}"
+    "folder_tpl": "",           # sub-folder template, e.g. "{site}/{uploader}"; empty = straight into the folder
+    "notify": True,             # a notification on the computer when a download finishes or fails
+    "clipboard": False,         # suggest downloading a video link copied to the clipboard
+    "phone": False,             # accept links sent from a phone on the same network
+    "phone_pin": "",
+    "phone_key": "",
+    "sub3d_cmd": "",            # optional command for the 3D subtitle tool: {file} = the .srt file
+    "update_url": "https://api.github.com/repos/mhassoun500/mo-downloader/releases/latest",
+    "update_checked": 0,
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
 SETTINGS_LOCK = threading.Lock()
@@ -351,6 +364,37 @@ if len(sys.argv) > 2 and sys.argv[1] == "--engine-check":
         "ffmpeg": bool(FFMPEG), "js": sorted(JS_RUNTIMES)}), encoding="utf-8")
     sys.exit(0)
 TOKEN = secrets.token_urlsafe(16)
+NO_WINDOW = 0x08000000 if SYSTEM == "Windows" else 0  # child processes without a console window
+
+# English for the interface and messages (Arabic text -> English), filled in by src/make.py from src/i18n_en.json
+I18N_EN = json.loads('{"(تُخطّي":"(skipped","(في Edge:":"(in Edge:","(مسرّع)":"(accelerated)","(مقطع":"(clip","(موجود سابقاً)":"(already there)","(نسخة معدّلة خصيصاً لسفاري).":"(a version adjusted especially for Safari) is created.","(يُحدَّث تلقائياً يومياً)":"(updated automatically every day)","(يُحدَّث عند كل تشغيل)":"(updated at every start)","(يُعرض أحدث":"(showing the latest",") للصور والمعارض. والمواقع غير الموجودة في القائمة كثيراً ما تعمل أيضاً عن طريق البحث العام في الصفحة، أو التقاط البث من إضافة المتصفح.":") for images and galleries. Sites not in the list often work too, through the general page search or by catching the stream with the browser extension.",") للفيديو والصوت، والثاني (":") for video and audio, and the second (",") مع الحفاظ على أسماء الملفات وترتيبها.":") keeping the file names and their order.","+ أفضل صوت":"+ best audio",". اتركهما فارغين للتسمية الافتراضية. مثال:":". Leave both empty for the default naming. Example:",". يمكنك تنزيله مجدداً.":"quality. You can download it again.","0 = بلا حد":"0 = no limit","12 ساعة":"12 hours","3 ساعات":"3 hours","6 ساعات":"6 hours","Deno غير موجود (يوتيوب محدود)":"Deno missing (YouTube limited)","FLAC (بدون فقد)":"FLAC (lossless)","MKV (يقبل كل الترميزات)":"MKV (accepts all codecs)","MO Downloader · يعمل محلياً على جهازك فقط، ولا يتجاوز المحتوى المحمي بتقنيات منع النسخ.":"MO Downloader · runs locally on your computer only, and does not bypass copy-protected content.","MP4 (الأكثر توافقاً)":"MP4 (most compatible)","ffmpeg غير موجود":"ffmpeg missing","http://host:port أو socks5://user:pass@host:port":"http://host:port or socks5://user:pass@host:port","· الإعدادات":"· settings","· السجل:":"· history:","· القنوات:":"· channels:","· المحرك الثاني":"· The second engine","· المدة":"· duration","· انتحال بصمة المتصفح:":"· Browser impersonation:","· بلا فصول":"· no chapters","· محرك التنزيل":"· download engine","· مقطع":"· clip","» غير صحيحة. اكتبه مثل 1:30 أو 1:02:45.":"» is wrong. Write it like 1:30 or 1:02:45.","،":",","آخر 10 فيديوهات + الجديد":"Last 10 videos + new","آخر 3 فيديوهات + الجديد":"Last 3 videos + new","آخر 30 فيديو + الجديد":"Last 30 videos + new","آخر فحص:":"Last check:","أثناء عمل الأداة، وتُحفظ الفيديوهات في مجلد باسم كل قناة. لتعمل المتابعة دائماً فعّل «التشغيل مع بدء الجهاز» من الإعدادات.":"while the tool is running, and videos are saved in a folder named after each channel. To keep following at all times, turn on «Start with the computer» in the settings.","أداة الترجمة ثلاثية الأبعاد (اختياري)":"3D subtitle tool (optional)","أداة التسريع (aria2) غير متوفرة في هذه النسخة، فتعمل التنزيلات باتصال واحد.":"The acceleration tool (aria2) is not available in this version, so downloads use a single connection.","أداة غير معروفة.":"Unknown tool.","أدوات":"Tools","أدوات التحويل":"Conversion tools","أرسل إلى الكمبيوتر":"Send to computer","أرسل روابط من جوالك إلى البرنامج وهما على نفس شبكة الواي فاي: امسح الرمز بكاميرا الجوال، والصق الرابط، واكتب كلمة المرور.":"Send links from your phone to the program while both are on the same Wi-Fi: scan the code with the phone camera, paste the link and enter the password.","أفضل جودة":"Best quality","أفضل جودة متاحة":"Best available quality","أمر الترجمة ثلاثية الأبعاد يجب أن يحتوي {file} مكان ملف الترجمة.":"The 3D subtitle command must contain {file} in place of the subtitle file.","أمر يُشغَّل على كل ملف ترجمة srt بعد التنزيل عند اختيار «تحويلها للعرض ثلاثي الأبعاد». ضع":"A command run on each srt subtitle file after the download when «Convert them for 3D viewing» is chosen. Put","أو افتح هذا العنوان في متصفح الجوال:":"Or open this address in the phone\'s browser:","أو الأفضل: اختر «ملف cookies.txt» أو Firefox من الإعدادات.":"or better: choose «cookies.txt file» or Firefox in the settings.","أُرسل ✓ — بدأ التنزيل على الكمبيوتر":"Sent ✓ — the download started on the computer","أُضيف":"Added","أُلغي":"Cancelled","أُلغي الفحص":"Check cancelled","أُوقف التسجيل وحُفظ ✓":"Recording stopped and saved ✓","إذا توقف موقع عن العمل فجأة، فغالباً غيّر نظامه: حدّث المحرك ثم أعد تشغيل البرنامج. وإن لم يُحل، جرّب القناة اليومية.":"If a site suddenly stops working, it probably changed its system: update the engine, then restart the program. If that doesn\'t help, try the nightly channel.","إذا فشل الاتصال المباشر بموقع، تعيد الأداة المحاولة تلقائياً عبر البروكسي، في عرض الجودات وفي التنزيل.":"If the direct connection to a site fails, the tool retries automatically through the proxy, both when showing qualities and when downloading.","إذا كان الرابط قائمة تشغيل: اعرض القائمة كاملة":"If the link is a playlist: show the whole list","إشعار على الجهاز عند انتهاء كل تنزيل":"A notification on the computer when each download finishes","إصدارات Chrome وEdge الحديثة على ويندوز تشفّر الكوكيز بطريقة تمنع البرامج الأخرى من قراءتها.":"Recent Chrome and Edge versions on Windows encrypt cookies in a way that prevents other programs from reading them.","إضافة إلى الطابور":"Add to queue","إضافة البيانات":"Adding metadata","إضافة المتصفح":"Browser extension","إطار/ث":"fps","إظهار MO Downloader":"Show MO Downloader","إظهار الملف":"Show file","إظهار الملف السابق":"Show the previous file","إعادة المحاولة":"Retry","إعادة المحاولة بالبث الذي التُقط من الصفحة…":"Retrying with the stream caught on the page…","إغلاق":"Close","إلغاء":"Cancel","إلغاء الكل":"Cancel all","إلغاء المتابعة":"Unfollow","إلى":"To","إيقاف الأداة":"Stop the tool","إيقاف مؤقت":"Pause","إيقاف مؤقت للكل":"Pause all","ابحث باسم الموقع… (مثل instagram أو tiktok أو vimeo)":"Search by site name… (like instagram, tiktok or vimeo)","ابحث بالعنوان أو القناة أو الموقع…":"Search by title, channel or site…","ابدأ":"Start","ابدأ في (اختياري)":"Start at (optional)","ابدأ من":"Start from","احفظ الإعدادات والقنوات المتابَعة والسجل في ملف واحد، لنقلها إلى جهاز آخر أو استرجاعها.":"Save the settings, followed channels and history in one file, to move them to another computer or restore them.","اختبار البروكسي":"Test proxy","اختبر رابطاً":"Test a link","اختبر هذا الرابط":"Test this link","اختر الدقة.":"Choose the resolution.","اختر المجلد من النافذة التي فُتحت. إن لم تظهر أمامك فابحث عنها في شريط المهام.":"Choose the folder in the window that opened. If it isn\'t in front of you, look for it in the taskbar.","اختر جودة من الجدول":"Choose a quality from the table","اختر كلمة مرور للجوال أولاً (من 4 إلى 10 أرقام).":"Choose a phone password first (4 to 10 digits).","اختر مجلد حفظ التنزيلات":"Choose the downloads save folder","اختر ملف فيديو أو صوت":"Choose a video or audio file","اخترت «ملف cookies.txt» لكن لم تحمّل الملف بعد. حمّله من تبويب الإعدادات.":"You chose «cookies.txt file» but haven\'t loaded the file yet. Load it from the settings tab.","اختيار مجلد":"Choose folder","اختيار ملف…":"Choose file…","استئناف الكل":"Resume all","استخدم «ملف cookies.txt» أو Firefox من الإعدادات بدلاً منها.":"Use «cookies.txt file» or Firefox in the settings instead.","استخراج الصوت":"Extract audio","استخراج الصوت (":"Extract audio (","استخراج الصوت MP3":"Extract audio MP3","استيراد من ملف…":"Import from file…","اسم القناة":"Channel name","اضغط":"Press","اضغط Ctrl+V داخل خانة الرابط.":"Press Ctrl+V inside the link field.","اضغط «تجهيز مجلد الإضافة» بالأسفل، فيُنشأ مجلد باسم":"Press «Prepare the extension folder» below; a folder named","اضغط «تحميل إضافة غير مُعبأة» (Load unpacked) واختر المجلد من الخطوة الأولى.":"Press «Load unpacked» and choose the folder from the first step.","اضغط مرة أخرى للتأكيد":"Press again to confirm","اكتب الحجم المطلوب بالميغابايت (والملف يجب أن يكون فيديو أو صوتاً له مدة).":"Enter the target size in MB (and the file must be a video or audio with a duration).","اكتب الوقت مثل 1:30 أو 1:02:45. اترك «إلى» فارغاً للتنزيل حتى النهاية. بدون القص الدقيق قد يبدأ المقطع قبل الوقت المحدد بثوانٍ قليلة.":"Write the time like 1:30 or 1:02:45. Leave «To» empty to download to the end. Without a precise cut the clip may start a few seconds early.","اكتب عنوان البروكسي أولاً.":"Enter the proxy address first.","اكتمل التنزيل ✓":"Download finished ✓","اكتمل مع ملاحظات":"Finished with notes","اكتمل ✓":"Done ✓","الآن":"now","الأدوات تحتاج ffmpeg.":"The tools need ffmpeg.","الأعلى":"Highest","الأنواع المدعومة: http و https و socks5. اترك الخانة فارغة لإيقاف البروكسي. قص جزء من الفيديو لا يعمل عبر بروكسي socks5.":"Supported types: http, https and socks5. Leave the field empty to turn the proxy off. Cutting part of a video does not work through a socks5 proxy.","الإرسال من الجوال":"Send from phone","الإصدار":"Version","الإصدار الحالي":"Current version","الإعدادات":"Settings","البث":"Streams","البث المباشر المسجَّل أيضاً":"Recorded live streams too","البث الملتقط من الصفحة":"the stream caught on the page","البث لم يبدأ بعد. أعد المحاولة عند بدايته، أو استخدم «تسجيل البث» لتنتظره الأداة.":"The stream hasn\'t started yet. Try again when it starts, or use «Record stream» so the tool waits for it.","البحث عن تحديث":"Check for update","البرنامج لا يستجيب — هل أُغلق؟":"The program is not responding — was it closed?","البروكسي":"the proxy","البروكسي (عند تعذّر الوصول إلى موقع)":"Proxy (when a site can\'t be reached)","البصمة لا تطابق — لن يُثبَّت هذا الملف.":"The fingerprint doesn\'t match — this file won\'t be installed.","الترجمة":"Subtitles","الترجمة الآلية إن لم توجد ترجمة أصلية":"Automatic subtitles if no original ones exist","التردد":"Sample rate","الترميز":"Codec","التسريع متوقف على هذا الجهاز":"Acceleration is off on this computer","التسريع يقسم الملف إلى أجزاء تُحمَّل معاً، ويتيح الإيقاف المؤقت والاستئناف من نفس النقطة. لا يعمل مع بروكسي socks5.":"Acceleration splits the file into parts downloaded together, and allows pausing and resuming from the same point. It doesn\'t work with a socks5 proxy.","التنزيلات":"Downloads","الجودة":"Quality","الجودة لكل العناصر":"Quality for all items","الحجم":"Size","الحجم المطلوب (ميغابايت)":"Target size (MB)","الحجم صغير جداً لمدة هذا الفيديو — أقل حجم معقول تقريباً":"The size is too small for this video\'s length — the smallest reasonable size is about","الحجم لا يطابق (":"The size doesn\'t match (","الدقة":"Resolution","الرابط مفقود.":"The link is missing.","الرموز:":"Tokens:","السجل":"History","السجل يمنع تكرار التنزيل في القوائم والدفعات والمتابعات. لإعادة تنزيل عنصر بتلك الطرق احذفه من السجل أولاً، أما التنزيل العادي من تبويب «تنزيل» فيعمل دائماً.":"The history prevents downloading the same item twice in lists, batches and followed channels. To download such an item again that way, delete it from the history first; a normal download from the «Download» tab always works.","الصق الروابط (كل رابط في سطر، أو أي نص يحتوي روابط)، فتُضاف كلها إلى طابور التنزيل وتنزل تباعاً.":"Paste the links (one per line, or any text containing links); they are all added to the download queue and downloaded one after another.","الصق رابطاً أولاً.":"Paste a link first.","الصيغة":"Format","الطريقة التي نجحت:":"Method that worked:","العربية":"Arabic","العملية":"Operation","العنصر":"item","الفيديو محذوف أو غير متاح، أو الرابط غير صحيح.":"The video was deleted or is unavailable, or the link is wrong.","الفيديوهات الجديدة فقط من الآن":"Only new videos from now","القالب":"Target","القالب يحتوي رموزاً غير مسموحة في أسماء الملفات: < > : \\" | ? *":"The template contains characters not allowed in file names: < > : \\" | ? *","القنوات المتابَعة":"Followed channels","الكوكيز (للمواقع التي تطلب تسجيل دخول)":"Cookies (for sites that require login)","المتابعة غير موجودة.":"Follow not found.","المتصفح مفتوح ويقفل ملف الكوكيز. أغلقه تماماً (من أيقونته بجانب الساعة أيضاً) ثم أعد المحاولة،":"The browser is open and locks the cookies file. Close it completely (also from its icon next to the clock) and try again,","المتصفح واختر من «فيديوهات التُقطت من هذه الصفحة».":"and choose from «Videos caught on this page».","المجلد غير موجود — ربما فُصل القرص أو نُقل المجلد.":"The folder doesn\'t exist — the drive may be disconnected or the folder moved.","المجموع:":"Total:","المحرك الأول":"The first engine","المحرك الأول (":"The first engine (","المحرك الأول (yt-dlp):":"First engine (yt-dlp):","المحرك الثاني (gallery-dl)":"the second engine (gallery-dl)","المحرك الثاني (gallery-dl) غير متوفر في هذه النسخة.":"The second engine (gallery-dl) is not available in this version.","المحرك الثاني (gallery-dl):":"Second engine (gallery-dl):","المحرك محدّث إلى آخر إصدار":"The engine is up to date with the latest","المختار:":"Selected:","المعرّف":"ID","المقاطع القصيرة (Shorts) أيضاً":"Shorts too","الملف غير موجود — اختر ملفاً من جهازك أو من السجل.":"The file doesn\'t exist — choose a file from your computer or from the history.","الملف غير موجود — ربما نُقل أو حُذف أو غُيّر اسمه.":"The file doesn\'t exist — it may have been moved, deleted or renamed.","الملف غير موجود.":"The file doesn\'t exist.","الملف ليس نسخة احتياطية صالحة.":"The file is not a valid backup.","الملف يحتوي إعداداتك، ولا يحتوي ملف الكوكيز. الاستيراد يضيف إلى ما عندك ولا يحذف شيئاً.":"The file contains your settings, not the cookies file. Importing adds to what you have and deletes nothing.","المهمة غير موجودة.":"Job not found.","المواقع المدعومة":"Supported sites","الموقع رفض الاتصال لأنه يحمي نفسه من البرامج الآلية. جرّبت الأداة انتحال بصمة متصفح حقيقي.":"The site refused the connection because it protects itself from automated programs. The tool tried impersonating a real browser.","الموقع رفض الاتصال — إعادة المحاولة بانتحال بصمة متصفح حقيقي…":"The site refused the connection — retrying as a real browser…","الموقع يطلب تسجيل الدخول — إعادة المحاولة بكوكيز المتصفح…":"The site requires login — retrying with the browser\'s cookies…","الموقع يطلب تسجيل الدخول: اختر «ملف cookies.txt» أو Firefox من الإعدادات ثم أعد المحاولة.":"The site requires login: choose «cookies.txt file» or Firefox in the settings, then try again.","النهاية":"the end","انتحال بصمة المتصفح":"browser impersonation","بث لم يبدأ بعد — ستنتظر الأداة بدايته ثم تسجّله":"A stream that hasn\'t started yet — the tool will wait for it to start, then record it","بث مباشر · من الآن":"Live stream · from now","بث مباشر · من البداية":"Live stream · from the start","بجودة":"in","بدأ تنزيل آخر الفيديوهات.":"Downloading the latest videos has started.","بدأت المتابعة — سيُنزَّل كل فيديو جديد":"Following started — every new video will be downloaded","بدل":"instead of","بدون":"None","بدون تحويل (الأصل)":"No conversion (original)","بدون عنوان":"Untitled","بروكسي:":"Proxy:","بعد التنزيل":"After download","تثبيت التحديث":"Install update","تجاهل":"Dismiss","تجهيز مجلد إضافة Safari":"Prepare the Safari extension folder","تجهيز مجلد الإضافة":"Prepare the extension folder","تحديث البرنامج":"Program update","تحديث المحرك الآن":"Update engine now","تحديث المحرك جاهز — أعد تشغيل الأداة":"Engine update ready — restart the tool","تحديث جاهز":"Update ready","تحميل ملف الكوكيز":"Load cookies file","تحويل":"Convert","تحويل الترجمة":"Converting subtitles","تحويل الصوت":"Converting audio","تحويل الصوت إلى":"Convert audio to","تحويل للتلفاز (1080p)":"Convert for TV (1080p)","تحويل للجوال (720p)":"Convert for phone (720p)","تحويلها للعرض ثلاثي الأبعاد":"Convert them for 3D viewing","تحويل…":"Convert…","تخطّي ما نزّلته سابقاً":"Skip what I downloaded before","ترميز الصوت":"Audio codec","ترميز الفيديو":"Video codec","تسجيل دخولك":"your login","تسجيل دخولك من إضافة المتصفح":"Your login from the browser extension","تسريع التنزيل (عدة اتصالات في نفس الوقت)":"Download acceleration (several connections at once)","تسريع ✓":"Acceleration ✓","تشغيل الأداة تلقائياً مع بدء الجهاز (في الخلفية، لتعمل المتابعة دائماً)":"Start the tool automatically with the computer (in the background, so following always works)","تصدير":"Export","تصغير إلى 480p":"Shrink to 480p","تصفّح…":"Browse…","تضمين الترجمة":"Embedding subtitles","تضمين الصورة المصغّرة":"Embedding the thumbnail","تضمين الصورة المصغّرة والبيانات":"Embed thumbnail and metadata","تعذّر":"failed","تعذّر إنشاء مجلد التنزيلات:":"Couldn\'t create the downloads folder:","تعذّر الاتصال عبر هذا البروكسي. تأكد من العنوان والمنفذ (واسم المستخدم وكلمة المرور إن وُجدت) وأنه يعمل.":"Couldn\'t connect through this proxy. Check the address and port (and username and password if any) and that it works.","تعذّر البحث عن تحديث (HTTP":"Couldn\'t look for an update (HTTP","تعذّر البحث عن تحديث:":"Couldn\'t look for an update:","تعذّر التسريع على هذا الجهاز — إكمال التنزيل بالطريقة العادية…":"Acceleration failed on this computer — finishing the download the normal way…","تعذّر التنزيل":"Couldn\'t download","تعذّر التنزيل.":"Couldn\'t download.","تعذّر الفتح:":"Couldn\'t open:","تعذّر النسخ":"Couldn\'t copy","تعذّر الوصول إلى الموقع من شبكتك (قد يكون محجوباً أو الاتصال مقطوعاً).":"The site can\'t be reached from your network (it may be blocked or the connection is down).","تعذّر تحديث المحرك:":"Couldn\'t update the engine:","تعذّر تنزيل التحديث:":"Couldn\'t download the update:","تعذّر تنزيل بعض العناصر (قد تكون خاصة أو محذوفة أو تتطلب تسجيل دخول):":"Some items couldn\'t be downloaded (they may be private, deleted or require login):","تعذّر فتح نافذة اختيار المجلد. اكتب المسار في الخانة يدوياً.":"Couldn\'t open the folder selection window. Type the path in the field manually.","تعذّر فتح نافذة اختيار الملف. الصق مسار الملف في الخانة يدوياً.":"Couldn\'t open the file selection window. Paste the file path in the field manually.","تعذّر قراءة الرابط.":"Couldn\'t read the link.","تغيير الحاوية":"Changing the container","تغيير الدقة":"Change resolution","تفعيل":"Enable","تفعيل الاستقبال من الجوال":"Accept links from the phone","تقسيم إلى":"Split into","تقسيم حسب الفصول":"Split by chapters","تقسيم حسب الفصول (ملف لكل فصل)":"Split by chapters (one file per chapter)","تم إيقاف MO Downloader":"MO Downloader has stopped","تم تنزيل:":"Downloaded:","تم حفظ ملف الكوكيز (":"Cookies file saved (","تنزيل":"Download","تنزيل الترجمات":"Download subtitles","تنزيل الترجمات وتضمينها":"Download and embed subtitles","تنزيل القائمة":"Download the list","تنزيل بأفضل جودة":"Download in best quality","تنزيل كل الملفات":"Download all files","تنزيل مجدداً":"Download again","تُحفظ في مجلد باسم القائمة، مرقّمة بترتيبها.":"Saved in a folder named after the list, numbered in order.","تُخطّي":"skipped","تُظهر زر تنزيل فوق أي فيديو في المتصفح، وزراً في شريط الأدوات، وخياراً في قائمة الزر الأيمن، بدون نسخ أي رابط.":"Shows a download button over any video in the browser, a button in the toolbar, and an item in the right-click menu, without copying any link.","تُفحص القنوات كل":"Channels are checked every","ثبّت Deno ثم أعد تشغيل الأداة.":"Install Deno, then restart the tool.","ثبّت أيقونة MO في شريط الأدوات من زر الإضافات (قطعة البازل).":"Pin the MO icon to the toolbar from the extensions button (the puzzle piece).","جارٍ اختبار الرابط…":"Testing the link…","جارٍ الاختبار…":"Testing…","جارٍ البحث عن إصدار جديد…":"Looking for a new version…","جارٍ التحديث…":"Updating…","جارٍ التحضير":"Preparing","جارٍ التحقق من تحديثات المحرك…":"Checking for engine updates…","جارٍ التحقق…":"Checking…","جارٍ التنزيل":"Downloading","جارٍ التنزيل بالمحرك الثاني (gallery-dl)…":"Downloading with the second engine (gallery-dl)…","جارٍ التنزيل بالمحرك الثاني ·":"Downloading with the second engine ·","جارٍ الفحص…":"Checking…","جارٍ المعالجة":"Processing","جارٍ تحميل القائمة…":"Loading the list…","جارٍ تسجيل البث المباشر":"Recording the live stream","جارٍ تسجيل البث المباشر…":"Recording the live stream…","جارٍ تسجيل البث من بدايته…":"Recording the stream from its start…","جارٍ تنزيل الإصدار":"Downloading version","جارٍ قراءة الصفحة واستخراج كل الجودات…":"Reading the page and extracting all qualities…","جارٍ قراءة القناة…":"Reading the channel…","جاهز للتثبيت.":"is ready to install.","جديد":"new","جرّبت الأداة البروكسي أيضاً ولم ينجح؛ تأكد أن البروكسي يعمل من «اختبار البروكسي» في الإعدادات.":"The tool tried the proxy too and it didn\'t work; check that the proxy works with «Test proxy» in the settings.","جودة":"qualities","جودة الصوت بعد التحويل":"Audio quality after conversion","حتى":"up to","حتى 1080p":"Up to 1080p","حتى 1440p":"Up to 1440p","حتى 360p":"Up to 360p","حتى 480p":"Up to 480p","حتى 4K":"Up to 4K","حتى 720p":"Up to 720p","حد سرعة التنزيل (كيلوبايت/ث)":"Download speed limit (KB/s)","حذف":"Delete","حذف من السجل":"Delete from history","حفظ":"Save","خروج":"Quit","دائماً":"Always","دائماً لكل التنزيلات":"Always, for every download","داخل الفيديو + ملف منفصل":"Inside the video + separate file","داخل الفيديو فقط":"Inside the video only","دفعة ·":"Batch ·","دفعة روابط":"Batch of links","دمج الصورة والصوت":"Merging picture and sound","رابط":"links","رابط إلى الطابور. تابع التقدّم في قائمة التنزيلات بالأسفل.":"links to the queue. Follow the progress in the downloads list below.","رابط فيديو في الحافظة":"Video link on the clipboard","رابط من الجوال":"Link from phone","رمز جديد":"New code","رموز اللغات مفصولة بفاصلة، مثل: ar, en, fr — أو all لكل اللغات":"Language codes separated by commas, like: ar, en, fr — or all for every language","رموز غير معروفة في القالب:":"Unknown tokens in the template:","روابط القوائم: نزّل القائمة كاملة":"Playlist links: download the whole list","ساعات":"hours","ساعة":"hour","سبق أن نزّلت هذا الفيديو في":"You already downloaded this video on","سجل التنزيلات":"Download history","سجّل دخولك في الموقع من المتصفح، ثم نزّل الفيديو من زر إضافة المتصفح لتستخدم الأداة تسجيل دخولك.":"Log in to the site in your browser, then download the video with the browser extension\'s button so the tool uses your login.","سجّل من الآن":"Record from now","سجّل من بداية البث (إن أتاحه الموقع)":"Record from the start of the stream (if the site allows)","سفاري يحذف الامتداد المؤقت عند إغلاقه أو بعد ٢٤ ساعة، فتكرر الخطوة ٣. وفي سفاري لا يتوفر «تمرير تنزيلات المتصفح» لأن سفاري لا يسمح للإضافات بذلك.":"Safari removes a temporary extension when it closes or after 24 hours, so repeat step 3. In Safari «Hand browser downloads to the app» is not available because Safari doesn\'t allow extensions to do it.","سيُنزَّل كل فيديو جديد تلقائياً.":"Every new video will be downloaded automatically.","صفحة الإصدارات غير متاحة للبرنامج (المستودع خاص) — حدّث يدوياً من صفحة الإصدارات.":"The releases page isn\'t available to the program (the repository is private) — update manually from the releases page.","صوت":"Audio","صوت MP3":"MP3 audio","صوت ·":"Audio ·","صوت فقط":"Audio only","صور ومعارض)":"images and galleries)","صورة فقط بأعلى الدقّات (4K/1080p…)؛ ستُدمج تلقائياً مع أفضل صوت متاح.":"Picture only at the highest resolutions (4K/1080p…); it is merged automatically with the best available audio.","صيغة الصوت":"Audio format","صيغة الصوت (عند اختيار صوت فقط)":"Audio format (when audio only is chosen)","صيغة الفيديو":"Video format","صيغة الوقت «":"The time format «","صيغة ملف الفيديو":"Video file format","ضع رابط القناة أو القائمة.":"Enter the channel or list link.","ضع رابط قناة أو قائمة تشغيل.":"Enter a channel or playlist link.","ضع رابط قناة يوتيوب (مثل youtube.com/@name) أو قائمة تشغيل، وستنزّل الأداة كل فيديو جديد فيها تلقائياً.":"Enter a YouTube channel link (like youtube.com/@name) or a playlist, and the tool will download every new video in it automatically.","ضع رابطاً أولاً.":"Enter a link first.","ضع رابطاً يبدأ بـ http أو https.":"Enter a link starting with http or https.","ضغط إلى":"Compress to","ضغط لحجم محدد":"Compress to a set size","طريقة فتح البرنامج":"How to open the program","عدة روابط":"Multiple links","عدة روابط دفعة واحدة":"Several links at once","عدد الاتصالات لكل ملف":"Connections per file","عدد التنزيلات في نفس الوقت":"Downloads at the same time","عرض الجودات":"Show qualities","عرض المزيد":"Show more","عن الأداة":"About","عند الفشل":"On failure","عند فشل الاتصال المباشر فقط (موصى به)":"Only when the direct connection fails (recommended)","عنصر":"items","عنصر).":"items).","عنوان البروكسي":"Proxy address","عنوان البروكسي يجب أن يبدأ بـ http:// أو https:// أو socks5://":"The proxy address must start with http://, https:// or socks5://","عنوان التحديثات يجب أن يبدأ بـ https://":"The update address must start with https://","عنوان الفيديو":"Video title","عنوان الفيديو [dQw4w9WgXcQ] 1080p":"Video title [dQw4w9WgXcQ] 1080p","عنوان صفحة آخر إصدار (GitHub API). يفحصه البرنامج مرة يومياً وينزّل الإصدار الجديد ويتحقق من بصمته قبل عرض التثبيت.":"Address of the latest-release page (GitHub API). The program checks it once a day, downloads the new version and verifies its fingerprint before offering to install.","غير متاح":"not available","غير متوفر":"not available","غيّر ملفاً موجوداً على جهازك: ضغطه لحجم محدد، تغيير دقته، تحويله للجوال أو التلفاز، استخراج صوته، أو تقسيمه حسب الفصول.":"Change a file already on your computer: compress it to a set size, change its resolution, convert it for phone or TV, extract its audio, or split it by chapters.","فتح الرابط":"Open link","فتح المجلد":"Open folder","فتح الملف في مشغّل الجهاز":"Open the file in the computer\'s player","فتح مجلد التنزيلات":"Open downloads folder","فتح مجلد الحفظ":"Open save folder","فحص الآن":"Check now","فحص القنوات المتابَعة كل":"Check followed channels every","فحص الكل الآن":"Check all now","فشل":"Failed","فشل ffmpeg:":"ffmpeg failed:","فشل الاتصال المباشر — إعادة المحاولة عبر البروكسي…":"The direct connection failed — retrying through the proxy…","فشل الفحص:":"Check failed:","فصول":"chapters","فعّل «وضع المطوّر» (Developer mode) من أعلى الصفحة.":"Turn on «Developer mode» at the top of the page.","في Chrome أو Edge أو Brave أو Opera افتح صفحة الإضافات بكتابة هذا العنوان في شريط العنوان:":"In Chrome, Edge, Brave or Opera open the extensions page by typing this address in the address bar:","في Safari على الماك":"In Safari on the Mac","في Safari: الإعدادات ← متقدم ← فعّل «إظهار ميزات مطوّري الويب».":"In Safari: Settings ← Advanced ← turn on «Show features for web developers».","في أول تفعيل قد يسأل ويندوز عن السماح للبرنامج بالشبكة: اختر «الشبكات الخاصة» فقط. «رمز جديد» يُبطل الرمز القديم.":"On first use Windows may ask whether to allow the program on the network: choose «Private networks» only. «New code» cancels the old one.","في الإعدادات ← الامتدادات: فعّل MO Downloader، ثم «تعديل مواقع الويب» واجعل «مواقع الويب الأخرى» على «السماح». بدون هذا لا تستطيع الإضافة الوصول إلى البرنامج.":"In Settings ← Extensions: turn on MO Downloader, then «Edit Websites» and set «Other websites» to «Allow». Without this the extension can\'t reach the program.","في الطابور":"in queue","في الطابور — سيكمل من حيث توقف":"In queue — will continue where it stopped","في الطابور — يكمل من الجلسة السابقة":"In queue — continuing from the previous session","في متصفح الإنترنت":"In the web browser","فيديو":"Video","فيديو ·":"videos ·","فيديو بصوت":"Video with audio","فيديو عالي الجودة":"High-quality video","فيُنشأ مجلد":"and a folder","فُتح ملف التحديث — اسحب التطبيق إلى مجلد التطبيقات واستبدل القديم.":"The update file was opened — drag the app into the Applications folder and replace the old one.","فُتح ملف التحديث.":"The update file was opened.","قائمة":"List","قائمة ·":"List ·","قائمة التشغيل":"Playlist","قائمة تشغيل":"Playlist","قالب اسم الملف":"File name template","قالب اسم الملف يجب أن يحتوي {title} أو {id} حتى لا تتشابه أسماء الملفات.":"The file name template must contain {title} or {id} so file names don\'t clash.","قالب المجلد":"Folder template","قالب جاهز (جوال / تلفاز)":"Ready-made target (phone / TV)","قص الفيديو يحتاج ffmpeg.":"Cutting a video needs ffmpeg.","قص جزء فقط":"Cut a part only","قص جزء متاح للفيديو الواحد فقط، وليس للقوائم.":"Cutting a part is available for a single video only, not for lists.","قص دقيق بالثانية (أبطأ)":"Precise cut to the second (slower)","قناة":"channel","قناة التحديث":"Update channel","قُرئ الرابط بطريقة:":"The link was read with:","كلمة المرور":"Password","كلمة المرور غير صحيحة.":"Wrong password.","كلمة مرور الجوال (4–10 أرقام)":"Phone password (4–10 digits)","كلمة مرور الجوال: من 4 إلى 10 أرقام.":"Phone password: 4 to 10 digits.","كما هي":"As is","كما هي من الموقع":"As provided by the site","كوكيز:":"Cookies:","لا تتوفر نافذة اختيار المجلدات على هذا النظام؛ اكتب المسار يدوياً.":"No folder selection window is available on this system; type the path manually.","لا تحذف المجلد بعد التثبيت، فالمتصفح يقرأ الإضافة منه. وعند تحديث الأداة اضغط «تجهيز مجلد الإضافة» مرة أخرى ثم زر التحديث في صفحة الإضافات.":"Don\'t delete the folder after installing: the browser reads the extension from it. When the tool is updated, press «Prepare the extension folder» again, then the update button on the extensions page.","لا توجد ترجمات لهذا الفيديو":"No subtitles for this video","لا توجد تنزيلات بعد.":"No downloads yet.","لا توجد صيغ من هذا النوع.":"No formats of this kind.","لا توجد فصول في هذا الملف.":"There are no chapters in this file.","لا توجد متابعات بعد.":"No followed channels yet.","لا جديد":"nothing new","لا جديد — كل العناصر نُزّلت سابقاً":"Nothing new — every item was downloaded before","لا روابط بعد":"No links yet","لا شيء":"Nothing","لا نتائج.":"No results.","لا يدعمه":"doesn\'t support it","لا يمكن معاينة هذا الملف داخل النافذة — استخدم «تشغيل».":"This file can\'t be previewed inside the window — use «Play».","لا يوجد تحديث جاهز.":"No update is ready.","لا يوجد دعم خاص — يُجرَّب البحث العام في الصفحة":"no dedicated support — the general page search is tried","لا يوجد على جهازك برنامج يفتح هذا النوع من الملفات.":"There is no program on your computer that opens this type of file.","لا يوجد في القائمة — جرّب «اختبر هذا الرابط» فكثير من المواقع تعمل بالبحث العام.":"Not in the list — try «Test this link»: many sites work through the general search.","لا يوجد فيديو يفهمه المحرك الأول — المحاولة بالمحرك الثاني (gallery-dl)…":"No video the first engine understands — trying the second engine (gallery-dl)…","لا يوجد ملف بعد":"No file yet","لا يُستخدم":"Not used","لديك أحدث إصدار (":"You have the latest version (","لصق":"Paste","لغات الترجمة":"Subtitle languages","لغة الواجهة":"Interface language","للتلفاز (1080p)":"For TV (1080p)","للجوال (720p)":"For phone (720p)","لم أجد أي رابط.":"No link found.","لم أجد أي رابط. ضع كل رابط في سطر.":"No link found. Put each link on its own line.","لم تنزّل شيئاً بعد.":"You haven\'t downloaded anything yet.","لم يُعثر على":"Not found:","لم يُعثر على فيديو أو ملفات في هذا الرابط.":"No video or files were found at this link.","لم يُعثر على فيديو يفهمه المحرك في هذه الصفحة. شغّل الفيديو في المتصفح، ثم افتح نافذة إضافة":"No video the engine understands was found on this page. Play the video in the browser, then open the browser extension window","لم يُعثر على ملفات في هذا الرابط.":"No files were found at this link.","لم يُفحص بعد":"Not checked yet","لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.":"For sites that require login (like private lists or age-restricted videos): install a browser extension that exports cookies in cookies.txt format (in the Chrome Web Store search for: Get cookies.txt LOCALLY), open the site while logged in, export the file, then choose «cookies.txt file» and press «Load cookies file». It is kept on your computer only. Don\'t send it to anyone: it is equivalent to your login.","ما زال يعمل — أيقونته بجانب الساعة.":"Still running — its icon is next to the clock.","مباشر":"direct","متابعة":"Follow","متابعة ·":"Follow ·","متابعة البث المباشر المسجَّل لهذه القناة":"Follow this channel\'s recorded live streams","متابعة القنوات":"Follow channels","متابعة المقاطع القصيرة لهذه القناة":"Follow this channel\'s Shorts","متابعة قناة أو قائمة":"Follow a channel or list","متابعة:":"Follow:","متاح ✓":"available ✓","متاح:":"Available:","متبقٍّ":"remaining","متوقف":"Off","متوقف مؤقتاً":"Paused","متوقف مؤقتاً — من الجلسة السابقة":"Paused — from the previous session","متوقفة":"Paused","متى يُستخدم":"When to use it","مجدول":"Scheduled","مجدول — يبدأ":"Scheduled — starts","مجلد الحفظ":"Save folder","مجلد الحفظ (يُنشأ داخله مجلد باسم القناة)":"Save folder (a folder named after the channel is created inside)","مجلد الحفظ الافتراضي":"Default save folder","مجلد الحفظ:":"Save folder:","محاولات خاطئة كثيرة — انتظر 5 دقائق.":"Too many wrong attempts — wait 5 minutes.","محرك التنزيل":"Download engine","محركان ✓":"Two engines ✓","مراقبة الحافظة: عند نسخ رابط فيديو اقترح تنزيله":"Watch the clipboard: when you copy a video link, suggest downloading it","مزايا إضافية":"Extra features","مسار الملف":"File path","مسار صوتي فقط؛ يمكنك تحويله إلى MP3 أو غيره من الخيارات بالأسفل.":"An audio track only; you can convert it to MP3 or other options below.","مستقر.":"stable.","مستقرة (موصى به)":"Stable (recommended)","مسح السجل كله":"Clear the whole history","مسح المنتهي":"Clear finished","مصدر التحديثات":"Update source","معاينة":"Preview","معدل البت":"Bitrate","معرض ·":"Gallery ·","معرض · gallery-dl":"Gallery · gallery-dl","معرض صور/ملفات":"Image/file gallery","معطّل حالياً في المحرك":"currently disabled in the engine","مفعّل":"On","مفعّلة":"On","مكان ملف الترجمة.":"in place of the subtitle file.","ملاحظة":"Note","ملف":"file","ملف cookies.txt (الأضمن)":"cookies.txt file (most reliable)","ملف ·":"files ·","ملف منفصل (srt) فقط":"Separate file (srt) only","ملف واحد يحتوي الصورة والصوت معاً كما يوفّره الموقع.":"One file containing picture and sound together, as the site provides it.","ملفات إضافة المتصفح غير موجودة في هذه النسخة.":"The browser extension files are not in this version.","من":"From","من الجوال":"From phone","من المتصفح":"From browser","من المتصفح ·":"From browser ·","من المتصفح · بث ملتقط ·":"From browser · caught stream ·","من المتصفح · ملف":"From browser · file","من قائمة «تطوير» اختر «إعدادات المطوّر…» ثم «إضافة امتداد مؤقت…» واختر مجلد سفاري.":"From the «Develop» menu choose «Developer Settings…», then «Add Temporary Extension…» and choose the Safari folder.","منها نُزّل سابقاً":"of them downloaded before","ميغابايت":"MB","ميغابايت.":"MB.","نافذة اختيار المجلد مفتوحة بالفعل. ابحث عنها في شريط المهام إن كانت خلف المتصفح.":"The folder selection window is already open. Look for it in the taskbar if it\'s behind the browser.","نافذة الاختيار مفتوحة بالفعل.":"The selection window is already open.","نافذة البرنامج الخاصة (موصى به)":"The program\'s own window (recommended)","نجح بطريقة:":"Worked with:","نزّل أي فيديو أو ملف صوتي بالجودة التي تختارها، أو قوائم كاملة، أو تابع قنواتك تلقائياً.":"Download any video or audio file in the quality you choose, whole playlists, or follow your channels automatically.","نسخ":"Copy","نسخ تقرير الخطأ":"Copy error report","نسخة احتياطية":"Backup","نُزّل":"downloaded","نُزّل سابقاً — تم التخطّي":"Downloaded before — skipped","هذا الرابط معرض أو منشور فيه صور أو ملفات متعددة، وسيُنزَّل بالمحرك الثاني (":"This link is a gallery or a post with several images or files; it will be downloaded with the second engine (","هذا المحتوى غير متاح في بلدك من مصدره.":"This content is not available in your country at its source.","هذا المحتوى محمي بتقنية منع النسخ ولا يمكن تنزيله.":"This content is protected by copy-prevention technology and can\'t be downloaded.","هذا الملف ليس فيديو.":"This file is not a video.","هذا بث مباشر":"This is a live stream","هذا رابط فيديو واحد. ضع رابط القناة أو قائمة التشغيل.":"This is a single video link. Enter the channel or playlist link.","هذا ليس ملف كوكيز صالحاً. صدّره بصيغة Netscape (cookies.txt) من إضافة المتصفح.":"This is not a valid cookies file. Export it in Netscape format (cookies.txt) from the browser extension.","هذا ليس ملف نسخة احتياطية من MO Downloader.":"This is not an MO Downloader backup file.","هذه الجودة لم تعد متاحة. اضغط «عرض الجودات» مجدداً واختر غيرها.":"This quality is no longer available. Press «Show qualities» again and choose another.","هذه الصفحة لا تحتوي رابطاً يمكن تنزيله.":"This page has no link that can be downloaded.","هذه القناة أو القائمة متابَعة بالفعل.":"This channel or list is already followed.","وقت النهاية يجب أن يكون بعد وقت البداية.":"The end time must be after the start time.","ويُفتح.":"is created and opened.","يدعمه باسم «":"supports it as «","يستمر التسجيل حتى ينتهي البث أو تضغط «⏹ إيقاف التسجيل وحفظه» في قائمة التنزيلات، ويُحفظ ما سُجّل.":"Recording continues until the stream ends or you press «⏹ Stop recording and save» in the downloads list; what was recorded is saved.","يعرض أي محرك يدعم الرابط، والطريقة التي نجحت في قراءته، قبل أن تنزّل.":"Shows which engine supports the link, and the method that managed to read it, before you download.","يعمل":"running","يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.":"You can close this page. To start it again, open the tool\'s icon.","يمكنك ضبط بروكسي من تبويب الإعدادات لتعيد الأداة المحاولة عبره تلقائياً.":"You can set a proxy in the settings tab so the tool retries through it automatically.","يوجد إصدار جديد":"A new version is available:","يوم":"day","يومي.":"nightly.","يومية — إصلاحات المواقع تصل إليها أولاً":"Nightly — site fixes reach it first","يُثبَّت التحديث الآن وسيفتح البرنامج من جديد.":"The update is being installed now; the program will open again.","يُحفظ الناتج بجانب الملف الأصلي باسم جديد، ولا يتغيّر الأصل. ويظهر التقدّم في قائمة التنزيلات بالأسفل.":"The result is saved next to the original file under a new name; the original is not changed. Progress appears in the downloads list below.","يُستخدم دائماً":"Always used","يُستخدم عند الحاجة فقط (موصى به)":"Used only when needed (recommended)","يُعرض أول 300 نتيجة — اكتب اسماً أدق.":"Showing the first 300 results — type a more exact name.","يُنشأ مجلد باسم الموقع داخل مجلد الحفظ.":"A folder named after the site is created inside the save folder.","— النهاية قبل البداية":"— the end is before the start","— صيغة الوقت غير صحيحة":"— invalid time format","— مقطع":"— clip","— نزّل دقائق محددة بدل الفيديو كاملاً":"— download specific minutes instead of the whole video","— نزّله من صفحة الإصدارات.":"— download it from the releases page.","— يُستخدم بعد إعادة تشغيل البرنامج.":"— used after restarting the program.","⏸ إيقاف مؤقت":"⏸ Pause","⏹ إيقاف التسجيل وحفظه":"⏹ Stop recording and save","⏺ تسجيل البث":"⏺ Record stream","▶ استئناف":"▶ Resume","▶ تشغيل":"▶ Play","⚡ أفضل جودة فيديو":"⚡ Best video quality","✓ أُضيف":"✓ Added","✓ استُورد":"✓ Imported","✓ الاستقبال متوقف":"✓ Receiving is off","✓ الاستقبال مفعّل":"✓ Receiving is on","✓ البروكسي يعمل (":"✓ The proxy works (","✓ النتيجة:":"✓ Result:","✓ بدأ التنزيل":"✓ Download started","✓ بدأ — تابع التقدّم في قائمة التنزيلات":"✓ Started — follow the progress in the downloads list","✓ تم إيقاف البروكسي":"✓ Proxy turned off","✓ تم الحفظ":"✓ Saved","✓ تم الحفظ — يُطبَّق عند فتح البرنامج المرة القادمة":"✓ Saved — applied the next time the program opens","✓ تم حفظ مجلد الحفظ الجديد":"✓ New save folder saved","✓ تمت متابعة «":"✓ Now following «","✓ حُفظ:":"✓ Saved:","✓ رمز جديد — امسحه من الجوال مرة أخرى":"✓ New code — scan it from the phone again","✓ ملف الكوكيز محفوظ":"✓ Cookies file saved","✓ نُسخ":"✓ Copied","✗ تعذّرت القراءة:":"✗ Couldn\'t read it:","🎵 أفضل صوت MP3":"🎵 Best audio MP3","📋 نسخت رابط فيديو:":"📋 You copied a video link:","🔴 بث مباشر":"🔴 Live stream"}')
+_I18N_KEYS = sorted(I18N_EN, key=len, reverse=True)
+_AR = "\u0600-\u06FF"
+
+
+def T(text):
+    """Translate a message for the interface language (English when chosen; Arabic is the source language).
+    Whole messages first; otherwise each known Arabic phrase inside a composed message."""
+    if SETTINGS.get("lang") != "en" or not text or not re.search(f"[{_AR}]", str(text)):
+        return text
+    norm = re.sub(r"\s+", " ", str(text)).strip()
+    if norm in I18N_EN:
+        return I18N_EN[norm]
+
+    def one_pass(o, short):
+        for k in _I18N_KEYS:
+            if (short or len(k) >= 6 or " " in k) and k in o:
+                o = re.sub(f"(?<![{_AR}]){re.escape(k)}(?![{_AR}])", lambda m: I18N_EN[k], o)
+        return o
+    long = one_pass(norm, False)
+    if not re.search(f"[{_AR}]", long):
+        return long
+    full = one_pass(long, True)
+    return long if re.search(f"[{_AR}]", full) else full.replace(stripped, I18N_EN[stripped])
+    for k in _I18N_KEYS:
+        if k in text:
+            text = re.sub(f"(?<![{_AR}]){re.escape(k)}(?![{_AR}])", lambda m: I18N_EN[k], text)
+    return text
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -1367,7 +1411,10 @@ def build_download_opts(req, job, logger):
     opts["paths"] = {"home": str(outdir)}
     opts["continuedl"] = True
     opts["overwrites"] = False
-    if accel_on(opts.get("proxy"), req) and not req.get("_impersonate"):  # aria2 can't present itself as a browser
+    limit = int(SETTINGS.get("rate_limit_kb") or 0)
+    if limit > 0:
+        opts["ratelimit"] = limit * 1024  # (aria2's many connections would go around the limit: not used then)
+    elif accel_on(opts.get("proxy"), req) and not req.get("_impersonate"):  # aria2 can't present itself as a browser
         opts["external_downloader"] = {"http": ARIA2C, "https": ARIA2C}
         opts["concurrent_fragment_downloads"] = max(4, min(16, int(SETTINGS.get("accel_conns") or 8)))
 
@@ -1415,6 +1462,8 @@ def build_download_opts(req, job, logger):
     # --- file names
     quality_part = "" if kind == "audio" else "%(height& {}p|)s"
     name = f"%(title).150B [%(id)s]{quality_part}{clip_suffix}.%(ext)s"
+    if SETTINGS.get("name_tpl"):
+        name = tpl_to_ytdlp(SETTINGS["name_tpl"], quality_part) + f"{clip_suffix}.%(ext)s"
     if req.get("sub_id"):
         folder = safe_name(req.get("folder") or "Channel")
         opts["outtmpl"] = {"default": f"{folder}/%(upload_date>%Y-%m-%d&{{}} - |)s{name}"}
@@ -1428,7 +1477,12 @@ def build_download_opts(req, job, logger):
         opts["outtmpl"] = {"default": f"{safe_name(req['name'], 120)} [{tag}]{quality_part}{clip_suffix}.%(ext)s"}
     else:
         # never start the template with a field that can be empty followed by "/" — that makes an absolute path
-        opts["outtmpl"] = {"default": name}
+        folder = tpl_to_ytdlp(SETTINGS["folder_tpl"], quality_part, folder=True) if SETTINGS.get("folder_tpl") else ""
+        opts["outtmpl"] = {"default": f"{folder}/{name}" if folder else name}
+    if req.get("split_chapters") and FFMPEG:
+        # one file per chapter (the whole video is kept too), in a folder next to it
+        pps.append({"key": "FFmpegSplitChapters", "force_keyframes": True})  # cut exactly at the chapter times
+        opts["outtmpl"]["chapter"] = "%(title).120B - chapters/%(section_number)03d - %(section_title).100B.%(ext)s"
 
     if req.get("live") in ("now", "start"):
         opts["live_from_start"] = req["live"] == "start"
@@ -1465,14 +1519,16 @@ def build_download_opts(req, job, logger):
             pps.append({"key": "FFmpegVideoRemuxer", "preferedformat": container})
             final_ext = container
         if want_subs:
+            mode = req.get("sub_mode") or "both"  # embed | file | both
             opts.update({
-                "writesubtitles": True, "writeautomaticsub": False,
-                "subtitleslangs": req.get("sub_langs") or ["ar", "ar-.*", "en", "en-.*"],
+                "writesubtitles": True, "writeautomaticsub": bool(req.get("sub_auto")),
+                "subtitleslangs": sub_langs(req.get("sub_langs")),
                 "subtitlesformat": "srt/vtt/best",
             })
             pps.append({"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"})
-            if final_ext in ("mp4", "mkv"):
-                pps.append({"key": "FFmpegEmbedSubtitle", "already_have_subtitle": True})
+            if final_ext in ("mp4", "mkv") and mode in ("embed", "both"):
+                # already_have_subtitle=True keeps the .srt files next to the video ("both")
+                pps.append({"key": "FFmpegEmbedSubtitle", "already_have_subtitle": mode == "both"})
 
     if want_meta:
         pps.append({"key": "FFmpegMetadata", "add_metadata": True, "add_chapters": True})
@@ -1699,6 +1755,9 @@ def run_job(job_id):
         flags, crash, code = {}, None, 0
         job["_thread"] = threading.get_ident()
         TMP_COOKIE_JOBS[job["_thread"]] = job
+        if req.get("tool"):
+            run_tool_job(job, req)
+            return
         attempts = job.setdefault("attempts", [])
         alts = [a for a in (req.get("alt_streams") or []) if a.get("url") and a["url"] != req["url"]][:3]
         if req.get("live"):
@@ -1786,6 +1845,8 @@ def run_job(job_id):
                 job.update(status="done", stage="أُوقف التسجيل وحُفظ ✓", percent=100, speed=None, eta=None)
             else:
                 job.update(status="done", stage="اكتمل ✓", percent=100, speed=None, eta=None)
+        if job["status"] == "done" and job.get("file") and not job.get("many"):
+            after_download(job, req)
     except Cancelled:
         with JOBS_LOCK:
             if job.get("pause"):
@@ -1806,8 +1867,685 @@ def run_job(job_id):
         drop_tmp_files(job)
         if req.get("sub_id") and job["status"] != PAUSED:
             sub_finished(req["sub_id"], job)
+        job_notify(job)
         with QUEUE:
             QUEUE.notify_all()
+
+
+# ================================================================ 2.7: tools, subtitles, notifications, …
+def sub_langs(v):
+    """'ar, en' or a list -> yt-dlp languages (each with its regional variants: en -> en, en-.*)."""
+    items = v if isinstance(v, list) else re.split(r"[\s,،]+", str(v or ""))
+    out = []
+    for x in (i.strip() for i in items):
+        if not x:
+            continue
+        if x in ("all", ".*"):
+            return ["all"]
+        out += [x] if ("*" in x or "-" in x) else [x, f"{x}-.*"]
+    return out or ["ar", "ar-.*", "en", "en-.*"]
+
+
+TPL_FIELDS = {
+    "title": "%(title).150B", "id": "%(id)s", "uploader": "%(uploader,channel,uploader_id|unknown)s",
+    "channel": "%(channel,uploader,uploader_id|unknown)s", "site": "%(extractor_key|site)s",
+    "date": "%(upload_date>%Y-%m-%d|no-date)s", "year": "%(upload_date>%Y|no-date)s",
+    "month": "%(upload_date>%Y-%m|no-date)s", "playlist": "%(playlist_title,playlist_id|no-playlist)s",
+    "index": "%(playlist_index|0)03d", "resolution": "%(height|0)sp", "ext": "%(ext)s",
+}
+
+
+def tpl_to_ytdlp(tpl, quality_part="", folder=False):
+    """User template ({title}, {uploader}, {site}, {date}, …) -> yt-dlp output template."""
+    tpl = str(tpl or "").strip().replace("\\", "/").strip("/")
+    tpl = tpl.replace("%", "%%")
+
+    def field(m):
+        k = m.group(1).lower()
+        if k == "quality":
+            return quality_part.strip() if not folder else "%(height|0)sp"
+        return TPL_FIELDS.get(k, m.group(0))
+    out = re.sub(r"\{(\w+)\}", field, tpl)
+    out = "/".join(x.strip() for x in out.split("/") if x.strip() and x.strip() not in (".", ".."))
+    return out
+
+
+def tpl_check(tpl, folder=False):
+    t = str(tpl or "").strip()
+    if not t:
+        return ""
+    bad = [k for k in re.findall(r"\{(\w+)\}", t) if k.lower() not in TPL_FIELDS and k.lower() != "quality"]
+    if bad:
+        raise ValueError("رموز غير معروفة في القالب: " + "، ".join("{" + b + "}" for b in bad))
+    if not folder and not re.search(r"\{(title|id)\}", t, re.I):
+        raise ValueError("قالب اسم الملف يجب أن يحتوي {title} أو {id} حتى لا تتشابه أسماء الملفات.")
+    if re.search(r'[<>:"|?*]', re.sub(r"\{\w+\}", "", t)):
+        raise ValueError('القالب يحتوي رموزاً غير مسموحة في أسماء الملفات: < > : " | ? *')
+    return t
+
+
+def tpl_example(name_tpl, folder_tpl):
+    ex = {"title": "عنوان الفيديو", "id": "dQw4w9WgXcQ", "uploader": "اسم القناة", "channel": "اسم القناة",
+          "site": "Youtube", "date": "2026-11-24", "year": "2026", "month": "2026-11", "playlist": "قائمة التشغيل",
+          "index": "007", "resolution": "1080p", "quality": "1080p", "ext": "mp4"}
+
+    ex = {k: T(v) for k, v in ex.items()}
+
+    def fill(t):
+        return re.sub(r"\{(\w+)\}", lambda m: ex.get(m.group(1).lower(), m.group(0)), t)
+    name = fill(name_tpl) if name_tpl else T("عنوان الفيديو") + " [dQw4w9WgXcQ] 1080p"
+    return (fill(folder_tpl).strip("/") + "/" if folder_tpl else "") + name + ".mp4"
+
+
+# ---------------------------------------------------------------- tools: change files that are already on disk
+TOOL_PRESETS = {  # ready-made targets
+    "mobile": {"label": "للجوال (720p)", "height": 720, "crf": 26, "abr": "128k"},
+    "tv": {"label": "للتلفاز (1080p)", "height": 1080, "crf": 21, "abr": "192k"},
+}
+AUDIO_CODECS = {"mp3": ["-c:a", "libmp3lame", "-q:a", "2"], "m4a": ["-c:a", "aac", "-b:a", "192k"],
+                "opus": ["-c:a", "libopus", "-b:a", "128k"], "flac": ["-c:a", "flac"], "wav": ["-c:a", "pcm_s16le"]}
+
+
+def probe_media(path):
+    """Duration, video height and chapters of a file (from ffmpeg's own report: no ffprobe in the bundle)."""
+    import subprocess
+    r = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    t = r.stderr
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", t)
+    dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+    hm = re.search(r"Stream #\S+.*Video:.*?(\d{2,5})x(\d{2,5})", t)
+    chapters = []
+    for cm in re.finditer(r"Chapter #\S+ start ([\d.]+), end ([\d.]+)\s*\n(?:\s*Metadata:\s*\n\s*title\s*:\s*(.*)\n)?", t):
+        chapters.append({"start": float(cm.group(1)), "end": float(cm.group(2)),
+                         "title": (cm.group(3) or "").strip() or f"Chapter {len(chapters) + 1}"})
+    return {"duration": dur, "height": int(hm.group(2)) if hm else 0, "video": bool(hm), "chapters": chapters}
+
+
+def _free_name(p):
+    p = Path(p)
+    n = 2
+    while p.exists():
+        p = p.with_name(f"{re.sub(r' \(\d+\)$', '', p.stem)} ({n}){p.suffix}")
+        n += 1
+    return p
+
+
+def tool_plan(req):
+    """What a tool job will do: (description, list of (ffmpeg args, output file), duration)."""
+    src = Path(str(req.get("input") or ""))
+    if not src.is_file():
+        raise ValueError("الملف غير موجود — اختر ملفاً من جهازك أو من السجل.")
+    if not FFMPEG:
+        raise ValueError("الأدوات تحتاج ffmpeg.")
+    info = probe_media(src)
+    op = req.get("tool")
+    stem, d = src.stem, src.parent
+    if op == "compress":
+        mb = float(req.get("target_mb") or 0)
+        if mb <= 0 or not info["duration"]:
+            raise ValueError("اكتب الحجم المطلوب بالميغابايت (والملف يجب أن يكون فيديو أو صوتاً له مدة).")
+        total_kbps = mb * 8192 * 0.95 / info["duration"]
+        a_kbps = 96 if total_kbps < 600 else 128
+        v_kbps = int(total_kbps - a_kbps)
+        if info["video"] and v_kbps < 80:
+            raise ValueError(f"الحجم صغير جداً لمدة هذا الفيديو — أقل حجم معقول تقريباً {int((80 + a_kbps) * info['duration'] / 8192 / 0.95) + 1} ميغابايت.")
+        out = _free_name(d / f"{stem} ({int(mb) if mb == int(mb) else mb}MB).mp4")
+        args = (["-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.3)}k",
+                 "-bufsize", f"{v_kbps * 2}k"] if info["video"] else ["-vn"]) + ["-c:a", "aac", "-b:a", f"{a_kbps}k"]
+        if not info["video"]:
+            out = out.with_suffix(".m4a")
+        return f"ضغط إلى {mb:g} ميغابايت", [(args + ["-movflags", "+faststart"], out)], info["duration"]
+    if op in ("resize", "preset"):
+        if not info["video"]:
+            raise ValueError("هذا الملف ليس فيديو.")
+        pr = TOOL_PRESETS.get(req.get("preset")) if op == "preset" else None
+        h = int(pr["height"] if pr else req.get("height") or 0)
+        if h < 144:
+            raise ValueError("اختر الدقة.")
+        crf, abr = (pr["crf"], pr["abr"]) if pr else (23, "160k")
+        label = pr["label"] if pr else f"{h}p"
+        out = _free_name(d / f"{stem} ({label}).mp4")
+        args = ["-vf", f"scale=-2:'min({h},ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+                "-profile:v", "high", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", abr, "-movflags", "+faststart"]
+        return ("تحويل " + label), [(args, out)], info["duration"]
+    if op == "audio":
+        fmt = req.get("format") if req.get("format") in AUDIO_CODECS else "mp3"
+        out = _free_name(d / f"{stem}.{fmt}")
+        return f"استخراج الصوت ({fmt.upper()})", [(["-vn", *AUDIO_CODECS[fmt]], out)], info["duration"]
+    if op == "chapters":
+        ch = info["chapters"]
+        if len(ch) < 2:
+            raise ValueError("لا توجد فصول في هذا الملف.")
+        folder = d / f"{stem} - chapters"
+        steps = []
+        # cut exactly at the chapter times: a plain copy could only cut at the video's key frames (seconds off);
+        # audio-only files are copied as they are (audio frames are tiny, so the cut is exact anyway)
+        enc = (["-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"] if info["video"]
+               else ["-map", "0:a", "-c", "copy"])
+        ext = ".mp4" if info["video"] else src.suffix
+        for i, c in enumerate(ch, 1):
+            out = folder / f"{i:03d} - {safe_name(c['title'], 100)}{ext}"
+            steps.append((["-ss", f"{c['start']:.3f}", "-t", f"{c['end'] - c['start']:.3f}", *enc], out))
+        return f"تقسيم إلى {len(ch)} فصول", steps, info["duration"]
+    raise ValueError("أداة غير معروفة.")
+
+
+def run_tool_job(job, req):
+    import subprocess
+    desc, steps, dur = tool_plan(req)
+    src = Path(req["input"])
+    with JOBS_LOCK:
+        job.update(status="processing", stage=desc + "…", percent=0, title=src.name, outdir=str(src.parent))
+    done_parts, total = 0, max(len(steps), 1)
+    for args, out in steps:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.stem + ".part" + out.suffix)
+        seek = args[:4] if args[:1] == ["-ss"] else []
+        rest = args[4:] if seek else args
+        cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *seek, "-i", str(src), *rest, str(tmp)]
+        piece = float(args[3]) if seek else dur
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+        job["_proc"] = proc
+        err_tail = []
+        threading.Thread(target=lambda: err_tail.extend(proc.stderr.read().splitlines()[-15:]), daemon=True).start()
+        for line in proc.stdout:
+            if job.get("cancel"):
+                proc.kill()
+                proc.wait()
+                tmp.unlink(missing_ok=True)
+                raise Cancelled()
+            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                try:
+                    t = int(line.split("=", 1)[1]) / 1e6
+                except ValueError:
+                    continue
+                frac = min(1.0, t / piece) if piece else 0
+                with JOBS_LOCK:
+                    job["percent"] = (done_parts + frac) / total * 100
+        code = proc.wait()
+        if code != 0 or not tmp.exists():
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError("فشل ffmpeg: " + " ".join(err_tail[-3:]))
+        tmp.replace(out)
+        done_parts += 1
+        history_add({"key": None, "title": out.stem, "file": str(out), "quality": desc,
+                     "size": out.stat().st_size, "date": time.time(), "source": "أدوات", "url": None})
+    with JOBS_LOCK:
+        first = steps[0][1]
+        job.update(status="done", stage=desc + " ✓", percent=100, file=str(first) if len(steps) == 1 else None,
+                   outdir=str(first.parent), done_count=len(steps), many=len(steps) > 1)
+
+
+def tool_job(req, label=None, source_label="أدوات"):
+    desc, steps, _ = tool_plan(req)  # checks the request now, so the page shows the error at once
+    r = {**req, "url": str(req["input"]), "title": Path(req["input"]).name}
+    return new_job(r, label=label or desc, source="tool", source_label=source_label)
+
+
+def after_download(job, req):
+    """What the user asked to happen once a single download is finished: a conversion, 3D subtitles."""
+    f = job.get("file")
+    if not f or not os.path.exists(f):
+        return
+    after = req.get("after") or {}
+    if after.get("tool"):
+        try:
+            tool_job({**after, "input": f}, source_label="بعد التنزيل")
+        except Exception as e:  # noqa: BLE001
+            log(f"[after] {e}")
+    if req.get("sub3d") and SETTINGS.get("sub3d_cmd"):
+        run_sub3d(f)
+
+
+def run_sub3d(video):
+    """The user's own 3D subtitle tool, run on each .srt saved next to the video."""
+    import shlex
+    import subprocess
+    v = Path(video)
+    for srt in sorted(v.parent.glob(glob_escape(v.stem) + "*.srt")):
+        cmd = SETTINGS["sub3d_cmd"].replace("{file}", f'"{srt}"')
+        try:
+            r = subprocess.run(cmd if SYSTEM == "Windows" else shlex.split(cmd), capture_output=True, text=True,
+                               timeout=600, creationflags=NO_WINDOW, cwd=str(v.parent))
+            log(f"[3d] {srt.name}: exit {r.returncode} {(r.stderr or '')[-200:]}")
+        except Exception as e:  # noqa: BLE001
+            log(f"[3d] {srt.name}: {e}")
+
+
+def glob_escape(s):
+    return re.sub(r"([\[\]*?])", r"[\1]", s)
+
+
+# ---------------------------------------------------------------- notifications on the computer
+def notify(title, body):
+    import subprocess
+    log(f"[notify] {title} — {body}")
+    if not SETTINGS.get("notify", True) or SELFTEST:
+        return
+    try:
+        if SYSTEM == "Windows":
+            tray = UI.get("tray")
+            if tray is not None:
+                tray.notify(body[:250], title[:60])
+        elif SYSTEM == "Darwin":
+            esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
+            subprocess.Popen(["osascript", "-e", f'display notification "{esc(body[:250])}" with title "{esc(title[:60])}"'])
+        elif shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "-a", APP_NAME, title, body])
+    except Exception as e:  # noqa: BLE001
+        log(f"[notify] not shown: {e}")
+
+
+def job_notify(job):
+    st = job.get("status")
+    if st not in ("done", "error") or job.get("_notified"):
+        return
+    job["_notified"] = True
+    if st == "done" and job.get("sub_id") and not job.get("done_count"):
+        return  # a channel check with nothing new
+    name = job.get("title") or job.get("url") or ""
+    if st == "error":
+        notify(T("تعذّر التنزيل"), f"{name}\n{T((job.get('error') or '').splitlines()[0] if job.get('error') else '')}")
+    elif job.get("many") and job.get("done_count"):
+        notify(T("اكتمل التنزيل ✓"), f"{name} — {job['done_count']} " + T("ملف"))
+    else:
+        notify(T("اكتمل التنزيل ✓"), name)
+
+
+# ---------------------------------------------------------------- watching the clipboard for video links
+CLIP = {"last": None, "seq": None, "suggest": None}
+
+
+def read_clipboard():
+    import subprocess
+    test = os.environ.get("MO_CLIP_FILE")
+    if test:
+        try:
+            return Path(test).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    if SYSTEM == "Windows":
+        import ctypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        seq = u.GetClipboardSequenceNumber()
+        if seq == CLIP["seq"]:
+            return CLIP["last"] or ""
+        CLIP["seq"] = seq
+        u.GetClipboardData.restype = ctypes.c_void_p
+        k.GlobalLock.restype = ctypes.c_void_p
+        k.GlobalLock.argtypes = k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        if not u.OpenClipboard(None):
+            return CLIP["last"] or ""
+        try:
+            h = u.GetClipboardData(13)  # CF_UNICODETEXT
+            if not h:
+                return ""
+            ptr = k.GlobalLock(h)
+            try:
+                return ctypes.wstring_at(ptr) if ptr else ""
+            finally:
+                k.GlobalUnlock(h)
+        finally:
+            u.CloseClipboard()
+    cmds = [["pbpaste"]] if SYSTEM == "Darwin" else [["wl-paste", "-n"], ["xclip", "-o", "-selection", "clipboard"],
+                                                    ["xsel", "-ob"]]
+    for c in cmds:
+        if shutil.which(c[0]):
+            try:
+                return subprocess.run(c, capture_output=True, text=True, timeout=2).stdout
+            except Exception:  # noqa: BLE001
+                return ""
+    return ""
+
+
+def link_worth_suggesting(url):
+    if re.search(r"\.(mp4|mkv|webm|mov|m4v|mp3|m4a|flac|wav|ogg|opus|m3u8|mpd)(\?|$)", url, re.I):
+        return True
+    try:
+        for ie in yt_dlp.extractor.gen_extractor_classes():
+            if ie.ie_key() != "Generic" and ie.suitable(url):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    site = gallery_site(url)
+    return bool(site and site != "directlink")
+
+
+def clipboard_loop():
+    while True:
+        time.sleep(1.5)
+        if not SETTINGS.get("clipboard"):
+            CLIP["last"] = None
+            continue
+        try:
+            text = (read_clipboard() or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if text == CLIP["last"]:
+            continue
+        first = CLIP["last"] is None
+        CLIP["last"] = text
+        if first and not os.environ.get("MO_CLIP_FILE"):
+            continue  # what was already copied before turning this on is not "new"
+        m = re.fullmatch(r"https?://\S+", text)
+        if m and len(text) < 2000 and link_worth_suggesting(text):
+            CLIP["suggest"] = {"url": text, "ts": time.time(), "id": uuid.uuid4().hex[:8]}
+            notify(T("رابط فيديو في الحافظة"), text[:120])
+
+
+# ---------------------------------------------------------------- links sent from a phone on the same network
+PHONE = {"server": None, "port": None, "fails": {}, "lock": threading.Lock()}
+PHONE_PORT = int(os.environ.get("MD_PHONE_PORT", 8790))
+
+
+def lan_ip():
+    import socket
+    s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s_.connect(("192.0.2.1", 9))  # no packet is sent: this only picks the network card used for the LAN
+        return s_.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s_.close()
+
+
+def phone_url():
+    return f"http://{lan_ip()}:{PHONE['port']}/m?k={SETTINGS.get('phone_key')}" if PHONE["port"] else ""
+
+
+def phone_qr_svg(text):
+    segno = ensure("segno", required=False)
+    if not segno or not text:
+        return ""
+    import io
+    buf = io.BytesIO()
+    segno.make(text, error="m").save(buf, kind="svg", scale=5, border=2, dark="#0e3b2e", xmldecl=False, svgns=True)
+    return buf.getvalue().decode()
+
+
+PHONE_PAGE = """<!doctype html><html lang="{lang}" dir="{dir}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>MO Downloader</title>
+<style>body{{font-family:system-ui,sans-serif;background:#f4f1ea;margin:0;padding:18px;color:#1d2a26}}
+.c{{background:#fffdf7;border-radius:14px;padding:18px;max-width:520px;margin:auto;box-shadow:0 2px 10px #0001}}
+h1{{font-size:20px;margin:0 0 12px}} textarea,input,select,button{{width:100%;box-sizing:border-box;font-size:16px;
+padding:11px;border-radius:10px;border:1px solid #cfc8b8;margin:6px 0}} button{{background:#0f6b54;color:#fff;border:0;
+font-weight:700}} #m{{margin-top:10px;font-weight:600}}</style></head><body><div class="c">
+<h1>MO Downloader</h1><form id="f"><textarea id="u" rows="3" placeholder="https://…" required dir="ltr"></textarea>
+<select id="q"><option value="best">{best}</option><option value="1080">1080p</option><option value="720">720p</option>
+<option value="audio">{audio}</option></select><input id="p" type="password" inputmode="numeric" placeholder="{pin}" required>
+<button>{send}</button></form><div id="m"></div></div><script>
+const k=new URLSearchParams(location.search).get("k");p.value=localStorage.getItem("mo-pin")||"";
+f.onsubmit=async e=>{{e.preventDefault();m.textContent="…";const r=await fetch("/m/add",{{method:"POST",
+headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{k,pin:p.value,url:u.value,preset:q.value}})}});
+const j=await r.json().catch(()=>({{}}));if(r.ok){{localStorage.setItem("mo-pin",p.value);u.value="";m.style.color="#0f6b54";
+m.textContent="{ok}"}}else{{m.style.color="#a33";m.textContent=j.error||r.status}}}};</script></body></html>"""
+
+
+class PhoneHandler(BaseHTTPRequestHandler):
+    server_version = "MODownloader-phone"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _key_ok(self, k):
+        return bool(SETTINGS.get("phone") and SETTINGS.get("phone_key")) and secrets.compare_digest(str(k or ""), SETTINGS["phone_key"])
+
+    def do_GET(self):  # noqa: N802
+        u = urlparse(self.path)
+        if u.path != "/m" or not self._key_ok(parse_qs(u.query).get("k", [""])[0]):
+            return self._send(404, b"not found", "text/plain")
+        en = SETTINGS.get("lang") == "en"
+        page = PHONE_PAGE.format(lang="en" if en else "ar", dir="ltr" if en else "rtl", best=T("أفضل جودة"),
+                                 audio=T("صوت MP3"), pin=T("كلمة المرور"), send=T("أرسل إلى الكمبيوتر"),
+                                 ok=T("أُرسل ✓ — بدأ التنزيل على الكمبيوتر"))
+        self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
+    def do_POST(self):  # noqa: N802
+        if urlparse(self.path).path != "/m/add":
+            return self._send(404, {"error": "not found"})
+        ip = self.client_address[0]
+        with PHONE["lock"]:
+            f = PHONE["fails"].get(ip, [0, 0])
+            if f[0] >= 5 and time.time() - f[1] < 300:
+                return self._send(429, {"error": T("محاولات خاطئة كثيرة — انتظر 5 دقائق.")})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            req = json.loads(self.rfile.read(min(n, 20000)) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "bad request"})
+        if not self._key_ok(req.get("k")):
+            return self._send(404, {"error": "not found"})
+        if not SETTINGS.get("phone_pin") or not secrets.compare_digest(str(req.get("pin") or ""), str(SETTINGS["phone_pin"])):
+            with PHONE["lock"]:
+                f = PHONE["fails"].get(ip, [0, 0])
+                PHONE["fails"][ip] = [f[0] + 1 if time.time() - f[1] < 300 else 1, time.time()]
+            return self._send(403, {"error": T("كلمة المرور غير صحيحة.")})
+        PHONE["fails"].pop(ip, None)
+        urls = re.findall(r"https?://[^\s<>\"']+", str(req.get("url") or ""))
+        if not urls:
+            return self._send(400, {"error": T("لم أجد أي رابط.")})
+        preset = str(req.get("preset") or "best")
+        preset = preset if preset in ("best", "audio") or preset.isdigit() else "best"
+        for u in urls[:20]:
+            new_job({"url": u, "mode": "preset", "preset": preset, "audio_convert": "mp3" if preset == "audio" else "original"},
+                    label=("MP3" if preset == "audio" else "أفضل جودة" if preset == "best" else preset + "p"),
+                    source="phone", source_label="من الجوال")
+        notify(T("رابط من الجوال"), urls[0][:120])
+        self._send(200, {"ok": True, "count": len(urls[:20])})
+
+
+def phone_apply():
+    """Start or stop the phone listener to match the settings."""
+    want = bool(SETTINGS.get("phone") and SETTINGS.get("phone_pin"))
+    if want and not SETTINGS.get("phone_key"):
+        SETTINGS["phone_key"] = secrets.token_urlsafe(12)
+        save_settings()
+    if want and not PHONE["server"]:
+        for port in range(PHONE_PORT, PHONE_PORT + 10):
+            try:
+                srv = ThreadingHTTPServer(("0.0.0.0", port), PhoneHandler)
+            except OSError:
+                continue
+            PHONE.update(server=srv, port=port)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            log(f"[phone] listening on the local network, port {port}")
+            break
+    elif not want and PHONE["server"]:
+        srv = PHONE["server"]
+        PHONE.update(server=None, port=None)
+        threading.Thread(target=lambda: (srv.shutdown(), srv.server_close()), daemon=True).start()
+        log("[phone] stopped")
+
+
+# ---------------------------------------------------------------- previews inside the window
+MEDIA_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+               ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+               ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac", ".wav": "audio/wav"}
+
+
+def preview_allowed(path):
+    """Only files the app downloaded or made (in the history) or anything under the downloads folder."""
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        return False
+    if not p.is_file() or p.suffix.lower() not in MEDIA_TYPES:
+        return False
+    roots = {Path(SETTINGS["outdir"]).resolve()}
+    if any(r == p or r in p.parents for r in roots):
+        return True
+    with HISTORY_LOCK:
+        return bool(HISTORY.execute("SELECT 1 FROM history WHERE file=? LIMIT 1", (str(path),)).fetchone())
+
+
+# ---------------------------------------------------------------- export / import
+def export_data():
+    with HISTORY_LOCK:
+        hist = [_history_row(r) for r in HISTORY.execute("SELECT * FROM history ORDER BY n").fetchall()]
+    with SUBS_LOCK:
+        subs = [{**s_, "_seen": sorted(read_set(sub_archive_path(s_["id"])))} for s_ in SUBS]
+    keep = {k: v for k, v in SETTINGS.items() if k not in ("engine_checked", "update_checked", "phone_key")}
+    data = {"app": APP_NAME, "version": APP_VERSION, "exported": time.strftime("%Y-%m-%d %H:%M"), "settings": keep,
+            "subs": subs, "history": hist, "archive": sorted(ARCHIVE)}
+    out = _free_name(Path(SETTINGS["outdir"]) / f"MO-Downloader-backup-{time.strftime('%Y-%m-%d')}.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    private_file(out)
+    return {"ok": True, "file": str(out), "history": len(hist), "subs": len(subs)}
+
+
+def import_data(data, parts):
+    if not isinstance(data, dict) or data.get("app") != APP_NAME:
+        raise ValueError("هذا ليس ملف نسخة احتياطية من MO Downloader.")
+    got = {}
+    if "settings" in parts and isinstance(data.get("settings"), dict):
+        for k, v in data["settings"].items():
+            if k in DEFAULT_SETTINGS and k not in ("engine_checked", "update_checked", "phone_key") and type(v) in (
+                    type(DEFAULT_SETTINGS[k]), int, float, str, bool):
+                SETTINGS[k] = v
+        save_settings()
+        phone_apply()
+        got["settings"] = True
+    if "subs" in parts:
+        n = 0
+        with SUBS_LOCK:
+            have = {s_["url"] for s_ in SUBS}
+            for s_ in data.get("subs") or []:
+                if not isinstance(s_, dict) or not s_.get("url") or s_["url"] in have:
+                    continue
+                seen = s_.pop("_seen", []) or []
+                s_["id"] = uuid.uuid4().hex[:8]
+                SUBS.append(s_)
+                have.add(s_["url"])
+                if seen:
+                    sub_archive_path(s_["id"]).write_text("".join(x + "\n" for x in seen), encoding="utf-8")
+                n += 1
+            save_subs()
+        got["subs"] = n
+    if "history" in parts:
+        with HISTORY_LOCK:
+            have = {(r["key"], round(r["date"] or 0, 2)) for r in HISTORY.execute("SELECT key, date FROM history")}
+            new = [h for h in data.get("history") or [] if isinstance(h, dict)
+                   and (h.get("key"), round(h.get("date") or 0, 2)) not in have]
+            _history_insert(HISTORY, new)
+            HISTORY.commit()
+            for k in data.get("archive") or []:
+                if isinstance(k, str) and k not in ARCHIVE:
+                    ARCHIVE.add(k)
+                    append_line(ARCHIVE_FILE, k)
+        got["history"] = len(new)
+    return {"ok": True, **got}
+
+
+# ---------------------------------------------------------------- updating the app itself
+UPDATE = {"state": "", "msg": "", "latest": None, "file": None, "notes": "", "page": None}
+
+
+def _asset_for_me(assets):
+    import platform
+    want = ("-Setup.exe",) if SYSTEM == "Windows" and FROZEN else \
+        (("-mac-arm64.dmg",) if platform.machine() == "arm64" else ("-mac-x64.dmg",)) if SYSTEM == "Darwin" and FROZEN else \
+        (".zip",)
+    for a in assets or []:
+        if any(str(a.get("name", "")).endswith(w) for w in want) and "full" not in a.get("name", ""):
+            return a
+    return None
+
+
+def update_check(download=True):
+    """Look at the latest release; if it is newer, download the file for this computer (and check its fingerprint)."""
+    import hashlib
+    url = SETTINGS.get("update_url")
+    if not url:
+        return UPDATE
+    UPDATE.update(state="checking", msg="جارٍ البحث عن إصدار جديد…")
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": APP_NAME})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rel = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        UPDATE.update(state="error", msg="صفحة الإصدارات غير متاحة للبرنامج (المستودع خاص) — حدّث يدوياً من صفحة الإصدارات."
+                      if e.code in (401, 403, 404) else f"تعذّر البحث عن تحديث (HTTP {e.code}).")
+        return UPDATE
+    except Exception as e:  # noqa: BLE001
+        UPDATE.update(state="error", msg=f"تعذّر البحث عن تحديث: {e}")
+        return UPDATE
+    SETTINGS["update_checked"] = time.time()
+    save_settings()
+    tag = str(rel.get("tag_name") or "").lstrip("vV")
+    UPDATE.update(latest=tag, notes=(rel.get("body") or "")[:3000], page=rel.get("html_url"))
+    if not tag or _ver_key(tag) <= _ver_key(APP_VERSION):
+        UPDATE.update(state="current", msg=f"لديك أحدث إصدار ({APP_VERSION}).")
+        return UPDATE
+    asset = _asset_for_me(rel.get("assets"))
+    if not asset:
+        UPDATE.update(state="available", msg=f"يوجد إصدار جديد {tag} — نزّله من صفحة الإصدارات.")
+        return UPDATE
+    if not download:
+        UPDATE.update(state="available", msg=f"يوجد إصدار جديد {tag}.")
+        return UPDATE
+    d = APP_DATA / "updates"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / asset["name"]
+    UPDATE.update(state="downloading", msg=f"جارٍ تنزيل الإصدار {tag}…")
+    try:
+        req = urllib.request.Request(asset.get("browser_download_url") or asset["url"],
+                                     headers={"Accept": "application/octet-stream", "User-Agent": APP_NAME})
+        h = hashlib.sha256()
+        tmp = out.with_suffix(out.suffix + ".part")
+        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+            for chunk in iter(lambda: r.read(1 << 16), b""):
+                f.write(chunk)
+                h.update(chunk)
+        size, digest = tmp.stat().st_size, str(asset.get("digest") or "")
+        if asset.get("size") and size != int(asset["size"]):
+            raise ValueError(f"الحجم لا يطابق ({size} بدل {asset['size']})")
+        if digest.startswith("sha256:") and digest[7:].lower() != h.hexdigest():
+            raise ValueError("البصمة لا تطابق — لن يُثبَّت هذا الملف.")
+        tmp.replace(out)
+    except Exception as e:  # noqa: BLE001
+        Path(str(out) + ".part").unlink(missing_ok=True)
+        UPDATE.update(state="error", msg=f"تعذّر تنزيل التحديث: {e}")
+        return UPDATE
+    UPDATE.update(state="ready", file=str(out), msg=f"الإصدار {tag} جاهز للتثبيت.")
+    notify(T("تحديث جاهز"), f"MO Downloader {tag}")
+    return UPDATE
+
+
+def update_install():
+    import subprocess
+    f = UPDATE.get("file")
+    if UPDATE.get("state") != "ready" or not f or not os.path.exists(f):
+        raise ValueError("لا يوجد تحديث جاهز.")
+    if f.endswith(".exe"):
+        save_queue()
+        subprocess.Popen([f, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"], creationflags=0x00000008)
+        threading.Thread(target=lambda: (time.sleep(1.5), quit_app()), daemon=True).start()
+        return {"ok": True, "msg": "يُثبَّت التحديث الآن وسيفتح البرنامج من جديد."}
+    open_path(f, play=True)  # a .dmg (drag the app into Applications) or the source .zip
+    return {"ok": True, "msg": "فُتح ملف التحديث — اسحب التطبيق إلى مجلد التطبيقات واستبدل القديم." if f.endswith(".dmg")
+            else "فُتح ملف التحديث."}
+
+
+def update_loop():
+    time.sleep(60)
+    while True:
+        if SETTINGS.get("update_url") and time.time() - float(SETTINGS.get("update_checked") or 0) > 86400:
+            update_check(download=FROZEN)
+        time.sleep(3600)
 
 
 def pause_job(j):
@@ -1907,10 +2645,17 @@ def new_job(req, label="", source="single", source_label=""):
         if b is not None and b <= (a or 0):
             raise ValueError("وقت النهاية يجب أن يكون بعد وقت البداية.")
     job_id = uuid.uuid4().hex[:10]
+    stage = "في الطابور"
+    if req.get("start_at"):
+        at = float(req["start_at"])
+        if at > time.time() + 2:
+            stage = "مجدول — يبدأ " + time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+        else:
+            req.pop("start_at", None)
     with QUEUE:
         JOBS[job_id] = {
             "id": job_id, "title": req.get("title") or req["url"], "url": req["url"], "status": "queued",
-            "stage": "في الطابور", "percent": 0, "created": time.time(), "label": label,
+            "stage": stage, "percent": 0, "created": time.time(), "label": label, "start_at": req.get("start_at"),
             "source": source, "source_label": source_label, "sub_id": req.get("sub_id"),
             "many": bool(req.get("playlist") or req.get("sub_id")), "_req": req,
         }
@@ -1930,7 +2675,9 @@ def scheduler_loop():
             slots = max(1, min(6, int(SETTINGS.get("max_parallel") or 2))) - running
             if slots <= 0:
                 continue
-            queued = sorted((j for j in JOBS.values() if j["status"] == "queued"), key=lambda j: j["created"])
+            now = time.time()
+            queued = sorted((j for j in JOBS.values() if j["status"] == "queued"
+                             and float((j.get("_req") or {}).get("start_at") or 0) <= now), key=lambda j: j["created"])
             for j in queued[:slots]:
                 j.update(status="starting", stage="جارٍ التحضير", started=time.time())
                 threading.Thread(target=run_job, args=(j["id"],), daemon=True).start()
@@ -2110,6 +2857,22 @@ def subs_loop():
 
 
 # ---------------------------------------------------------------- start with the computer
+def app_icon_file():
+    """An .ico of the logo for the Python version (next to the script, or written from the built-in logo)."""
+    f = Path(__file__).with_name("mo_downloader.ico")
+    if f.exists():
+        return str(f)
+    out = APP_DATA / "mo_downloader.ico"
+    if not out.exists():
+        try:
+            import io
+            from PIL import Image
+            Image.open(io.BytesIO(LOGO_PNG)).convert("RGBA").save(out, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128)])
+        except Exception:  # noqa: BLE001
+            return None
+    return str(out)
+
+
 def app_icon_path():
     if FROZEN:
         return sys.executable
@@ -2243,19 +3006,77 @@ def register_native_host():
         log(f"[native] browser helper not registered: {e}")
 
 
-def open_path(path, select=False):
-    p = Path(path)
+class OpenError(Exception):
+    pass
+
+
+def _win_select(p):
+    """Open the folder in Explorer with the file selected (the shell's own call: no quoting problems with
+    spaces, commas or Arabic names, unlike "explorer /select,")."""
+    import ctypes
+    from ctypes import wintypes
+    shell32, ole32 = ctypes.windll.shell32, ctypes.windll.ole32
+    ole32.CoInitialize(None)
+    shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+    shell32.ILCreateFromPathW.argtypes = [wintypes.LPCWSTR]
+    shell32.SHOpenFolderAndSelectItems.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, wintypes.DWORD]
+    shell32.ILFree.argtypes = [ctypes.c_void_p]
+    pidl = shell32.ILCreateFromPathW(str(p))
+    if not pidl:
+        raise OSError("ILCreateFromPathW failed")
+    try:
+        hr = shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+        if hr != 0:
+            raise OSError(f"SHOpenFolderAndSelectItems 0x{hr & 0xFFFFFFFF:08x}")
+    finally:
+        shell32.ILFree(pidl)
+
+
+def open_path(path, select=False, play=False):
+    """Show a folder, show a file selected in its folder, or (play) open the file in the system's own player.
+    Raises OpenError with an Arabic reason the page shows to the user."""
+    p = Path(path) if path else Path(SETTINGS["outdir"])
     if not p.exists():
-        p = p.parent if p.parent.exists() else Path(SETTINGS["outdir"])
-    if SYSTEM == "Windows":
-        if select and p.is_file():
-            subprocess.Popen(["explorer", "/select,", str(p)])
+        if play:
+            raise OpenError("الملف غير موجود — ربما نُقل أو حُذف أو غُيّر اسمه.")
+        if not path or Path(path) == Path(SETTINGS["outdir"]):
+            try:
+                p.mkdir(parents=True, exist_ok=True)  # the downloads folder before the first download
+            except OSError as e:
+                raise OpenError(f"تعذّر إنشاء مجلد التنزيلات: {p} ({e.strerror or e})")
         else:
-            os.startfile(str(p if p.is_dir() else p.parent))  # type: ignore[attr-defined]
-    elif SYSTEM == "Darwin":
-        subprocess.Popen(["open", "-R", str(p)] if select and p.is_file() else ["open", str(p)])
-    else:
-        subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+            p = next((x for x in Path(path).parents if x.exists()), Path(SETTINGS["outdir"]))
+            select = False
+            if not p.exists():
+                raise OpenError("المجلد غير موجود — ربما فُصل القرص أو نُقل المجلد.")
+    log(f"[open] {'play' if play else 'select' if select else 'open'}: {p}")
+    try:
+        if SYSTEM == "Windows":
+            try:  # let the window that opens come to the front instead of flashing in the taskbar
+                import ctypes
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+            except Exception:  # noqa: BLE001
+                pass
+            if play:
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif select and p.is_file():
+                try:
+                    _win_select(p)
+                except Exception as e:  # noqa: BLE001
+                    log(f"[open] shell select failed ({e}); using explorer")
+                    subprocess.Popen(f'explorer /select,"{p}"')
+            else:
+                os.startfile(str(p if p.is_dir() else p.parent))  # type: ignore[attr-defined]
+        elif SYSTEM == "Darwin":
+            subprocess.Popen(["open", str(p)] if play or not (select and p.is_file()) else ["open", "-R", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p if play or p.is_dir() else p.parent)])
+    except OSError as e:
+        log(f"[open] failed: {e}")
+        if play and getattr(e, "winerror", None) in (1155, 1156):
+            raise OpenError("لا يوجد على جهازك برنامج يفتح هذا النوع من الملفات.")
+        raise OpenError(f"تعذّر الفتح: {e.strerror or e}")
+    return {"ok": True}
 
 
 def history_query(q="", limit=100, offset=0):
@@ -2387,6 +3208,46 @@ def pick_folder(initial=""):
     return out
 
 
+def pick_file(initial=""):
+    """Native 'choose a file' dialog (for the tools). Returns a path or None."""
+    initial = initial if initial and os.path.isdir(initial) else str(Path.home())
+    title = "اختر ملف فيديو أو صوت"
+    win = UI.get("win")
+    if win is not None:
+        try:
+            import webview
+            r = win.create_file_dialog(getattr(webview, "FileDialog", webview).OPEN if hasattr(webview, "FileDialog")
+                                       else webview.OPEN_DIALOG, directory=initial)
+            return (r[0] if isinstance(r, (list, tuple)) else r) if r else None
+        except Exception as e:  # noqa: BLE001
+            log(f"[pick] window file dialog failed: {e}")
+    if not PICK_LOCK.acquire(blocking=False):
+        raise ValueError("نافذة الاختيار مفتوحة بالفعل.")
+    try:
+        if SYSTEM == "Darwin":
+            esc = initial.replace('"', '\\"')
+            r = subprocess.run(["osascript", "-e", f'activate\nset f to choose file with prompt "{title}" default location '
+                                f'(POSIX file "{esc}")\nPOSIX path of f'], capture_output=True, timeout=900)
+            return r.stdout.decode("utf-8", "replace").strip() or None
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            root.update()
+            path = filedialog.askopenfilename(parent=root, initialdir=initial, title=title)
+        finally:
+            root.destroy()
+        return os.path.normpath(path) if path else None
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception as e:  # noqa: BLE001
+        raise ValueError("تعذّر فتح نافذة اختيار الملف. الصق مسار الملف في الخانة يدوياً.\n" + str(e)[:200]) from e
+    finally:
+        PICK_LOCK.release()
+
+
 def proxy_test(proxy):
     proxy = str(proxy or "").strip()
     if not proxy:
@@ -2498,11 +3359,11 @@ def start_windows_tray():
     from PIL import Image
     image = Image.open(io.BytesIO(LOGO_PNG)).convert("RGBA").resize((64, 64))
     menu = pystray.Menu(
-        pystray.MenuItem(TRAY_TEXT["show"], lambda *a: show_window(), default=True),
-        pystray.MenuItem(TRAY_TEXT["pause"], lambda *a: pause_all()),
-        pystray.MenuItem(TRAY_TEXT["resume"], lambda *a: resume_all()),
+        pystray.MenuItem(T(TRAY_TEXT["show"]), lambda *a: show_window(), default=True),
+        pystray.MenuItem(T(TRAY_TEXT["pause"]), lambda *a: pause_all()),
+        pystray.MenuItem(T(TRAY_TEXT["resume"]), lambda *a: resume_all()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem(TRAY_TEXT["quit"], lambda icon, item: (icon.stop(), _tray_quit())),
+        pystray.MenuItem(T(TRAY_TEXT["quit"]), lambda icon, item: (icon.stop(), _tray_quit())),
     )
     icon = pystray.Icon("MO Downloader", image, APP_NAME, menu)
     threading.Thread(target=icon.run, daemon=True).start()
@@ -2540,8 +3401,8 @@ def start_mac_status_item():
     item.button().setImage_(img)
     item.button().setToolTip_(APP_NAME)
     menu = AppKit.NSMenu.alloc().init()
-    for title, sel in ((TRAY_TEXT["show"], "show:"), (TRAY_TEXT["pause"], "pauseAll:"), (TRAY_TEXT["resume"], "resumeAll:"),
-                       (None, None), (TRAY_TEXT["quit"], "quit:")):
+    for title, sel in ((T(TRAY_TEXT["show"]), "show:"), (T(TRAY_TEXT["pause"]), "pauseAll:"),
+                       (T(TRAY_TEXT["resume"]), "resumeAll:"), (None, None), (T(TRAY_TEXT["quit"]), "quit:")):
         if title is None:
             menu.addItem_(AppKit.NSMenuItem.separatorItem())
             continue
@@ -2608,7 +3469,7 @@ def run_window(url, hidden):
             if SYSTEM == "Windows" and tray is not None and not UI.get("told_tray"):
                 UI["told_tray"] = True
                 try:
-                    tray.notify("ما زال يعمل — أيقونته بجانب الساعة.", APP_NAME)
+                    tray.notify(T("ما زال يعمل — أيقونته بجانب الساعة."), APP_NAME)
                 except Exception:  # noqa: BLE001
                     pass
             return False
@@ -2639,7 +3500,17 @@ def run_window(url, hidden):
     gui = os.environ.get("MO_GUI") or ("edgechromium" if SYSTEM == "Windows" else "cocoa" if SYSTEM == "Darwin" else "qt")
     UI["gui"] = gui or "native"
     (APP_DATA / "webview").mkdir(parents=True, exist_ok=True)
-    webview.start(start_tray, gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"))
+    icon = None
+    if SYSTEM == "Windows":
+        try:  # own taskbar group + icon (otherwise the Python version shows up as pythonw with Python's logo)
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MO.Downloader")
+        except Exception:  # noqa: BLE001
+            pass
+        if not FROZEN:
+            icon = app_icon_file()
+    webview.start(start_tray, gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"),
+                  **({"icon": icon} if icon else {}))
     if UI.get("tray") is not None and SYSTEM == "Windows":
         try:
             UI["tray"].stop()
@@ -2834,6 +3705,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_file(self, p):
+        size = p.stat().st_size
+        rng = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+        start, end = 0, size - 1
+        if rng and (rng.group(1) or rng.group(2)):
+            if rng.group(1):
+                start = int(rng.group(1))
+                end = int(rng.group(2)) if rng.group(2) else size - 1
+            else:
+                start = max(0, size - int(rng.group(2)))
+            end = min(end, size - 1)
+            if start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return None
+        self.send_response(206 if rng else 200)
+        self.send_header("Content-Type", MEDIA_TYPES.get(p.suffix.lower(), "application/octet-stream"))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if rng:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(p, "rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(1 << 16, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return None
+
     def _authorized(self):
         return self.headers.get("X-Token") == TOKEN
 
@@ -2924,13 +3832,15 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/logo.png", "/favicon.ico"):
             return self._send(200, LOGO_PNG, "image/png")
         if u.path == "/api/ping":
-            return self._send(200, {"app": APP_NAME})
+            return self._send(200, {"app": APP_NAME, "version": APP_VERSION, "frozen": FROZEN, "busy": busy()})
         if u.path in ("/", "/index.html"):
-            html = PAGE.replace("__TOKEN__", TOKEN)
+            html = PAGE.replace("__TOKEN__", TOKEN).replace('"__LANG__"', json.dumps(SETTINGS.get("lang") or "ar"))
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
-        if not self._authorized():
-            return self._send(403, {"error": "forbidden"})
         qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/api/media" and qs.get("t"):
+            pass
+        elif not self._authorized():
+            return self._send(403, {"error": "forbidden"})
         if u.path == "/api/jobs":
             with JOBS_LOCK:
                 jobs = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)[:200]
@@ -2945,7 +3855,20 @@ class Handler(BaseHTTPRequestHandler):
                 "gallery": ENGINE.get("gallery"), "impersonate": IMPERSONATE,
                 "engine": {"channel": SETTINGS.get("engine_channel", "stable"), "updating": ENGINE["updating"],
                            "msg": ENGINE["msg"], "pending": ENGINE["pending"]},
+                "clip": CLIP["suggest"] if CLIP["suggest"] and time.time() - CLIP["suggest"]["ts"] < 180 else None,
+                "phone": {"on": bool(PHONE["server"]), "url": phone_url()},
+                "update": {k: v for k, v in UPDATE.items() if k != "file"},
+                "tpl_example": tpl_example(SETTINGS.get("name_tpl"), SETTINGS.get("folder_tpl")),
+                "presets": {k: v["label"] for k, v in TOOL_PRESETS.items()},
             })
+        if u.path == "/api/media":
+            # previews: <video> can't send headers, so the token comes in the address
+            if not secrets.compare_digest(qs.get("t", ""), TOKEN) or not preview_allowed(qs.get("path", "")):
+                return self._send(403, {"error": "forbidden"})
+            return self._send_file(Path(qs["path"]))
+        if u.path == "/api/clip":
+            c = CLIP["suggest"]
+            return self._send(200, {"clip": c if c and time.time() - c["ts"] < 180 else None})
         if u.path == "/api/sites":
             return self._send(200, {"sites": supported_sites()})
         if u.path == "/api/history":
@@ -2972,6 +3895,29 @@ class Handler(BaseHTTPRequestHandler):
                 src = "playlist" if req.get("playlist") else "single"
                 return self._send(200, {"id": new_job(req, label=req.get("label") or "", source=src,
                                                       source_label="قائمة تشغيل" if req.get("playlist") else "")})
+            if p == "/api/tool":
+                return self._send(200, {"id": tool_job(req)})
+            if p == "/api/probe":
+                if not Path(str(req.get("path") or "")).is_file():
+                    raise ValueError("الملف غير موجود.")
+                return self._send(200, {**probe_media(req["path"]), "name": Path(req["path"]).name})
+            if p == "/api/pick_file":
+                path = pick_file(req.get("initial") or SETTINGS["outdir"])
+                return self._send(200, {"path": path} if path else {"cancelled": True})
+            if p == "/api/clip_dismiss":
+                CLIP["suggest"] = None
+                return self._send(200, {"ok": True})
+            if p == "/api/phone":
+                return self._send(200, {"on": bool(PHONE["server"]), "url": phone_url(), "svg": phone_qr_svg(phone_url())})
+            if p == "/api/export":
+                return self._send(200, export_data())
+            if p == "/api/import":
+                return self._send(200, import_data(req.get("data"), set(req.get("parts") or ["settings", "subs", "history"])))
+            if p == "/api/update_check":
+                threading.Thread(target=update_check, kwargs={"download": True}, daemon=True).start()
+                return self._send(200, {"ok": True})
+            if p == "/api/update_install":
+                return self._send(200, update_install())
             if p == "/api/batch":
                 return self._send(200, batch_jobs(req))
             if p == "/api/cancel":
@@ -3037,8 +3983,11 @@ class Handler(BaseHTTPRequestHandler):
                         del JOBS[k]
                 return self._send(200, {"ok": True})
             if p == "/api/open":
-                open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")))
-                return self._send(200, {"ok": True})
+                try:
+                    return self._send(200, open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")),
+                                                     play=bool(req.get("play"))))
+                except OpenError as e:
+                    return self._send(200, {"ok": False, "error": str(e)})
             if p == "/api/pick_folder":
                 path = pick_folder(req.get("initial") or SETTINGS["outdir"])
                 return self._send(200, {"path": path} if path else {"cancelled": True})
@@ -3093,8 +4042,39 @@ class Handler(BaseHTTPRequestHandler):
                     changed["ui"] = req["ui"]
                 if req.get("engine_channel") in ("stable", "nightly"):
                     changed["engine_channel"] = req["engine_channel"]
+                if req.get("lang") in ("ar", "en"):
+                    changed["lang"] = req["lang"]
+                if "rate_limit_kb" in req:
+                    changed["rate_limit_kb"] = max(0, min(10_000_000, int(req["rate_limit_kb"] or 0)))
+                if "name_tpl" in req:
+                    changed["name_tpl"] = tpl_check(req["name_tpl"])
+                if "folder_tpl" in req:
+                    changed["folder_tpl"] = tpl_check(req["folder_tpl"], folder=True)
+                for k in ("notify", "clipboard", "phone"):
+                    if k in req:
+                        changed[k] = bool(req[k])
+                if "phone_pin" in req:
+                    pin = str(req["phone_pin"] or "").strip()
+                    if pin and not re.fullmatch(r"\d{4,10}", pin):
+                        raise ValueError("كلمة مرور الجوال: من 4 إلى 10 أرقام.")
+                    changed["phone_pin"] = pin
+                if changed.get("phone") and not (changed.get("phone_pin") or SETTINGS.get("phone_pin")):
+                    raise ValueError("اختر كلمة مرور للجوال أولاً (من 4 إلى 10 أرقام).")
+                if req.get("phone_new_key"):
+                    changed["phone_key"] = secrets.token_urlsafe(12)
+                if "sub3d_cmd" in req:
+                    cmd = str(req["sub3d_cmd"] or "").strip()
+                    if cmd and "{file}" not in cmd:
+                        raise ValueError("أمر الترجمة ثلاثية الأبعاد يجب أن يحتوي {file} مكان ملف الترجمة.")
+                    changed["sub3d_cmd"] = cmd
+                if "update_url" in req:
+                    uu = str(req["update_url"] or "").strip()
+                    if uu and not uu.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+                        raise ValueError("عنوان التحديثات يجب أن يبدأ بـ https://")
+                    changed["update_url"] = uu
                 SETTINGS.update(changed)
                 save_settings()
+                phone_apply()
                 if "autostart" in req:
                     set_autostart(bool(req["autostart"]))
                 with QUEUE:
@@ -3161,6 +4141,74 @@ def already_running(port):
     return None
 
 
+def replace_other_copy(port):
+    """The installed app was opened while the Python version (or an older installed copy) is running — e.g. one that
+    starts with Windows. Close that copy and take its place, unless it is downloading something."""
+    o = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        info = json.loads(o.open(f"http://127.0.0.1:{port}/api/ping", timeout=2).read())
+        if info.get("frozen") and info.get("version") == APP_VERSION:
+            return False  # the same installed app: just show it
+        if info.get("busy"):
+            log(f"[start] another copy ({info.get('version') or 'older'}) is downloading - leaving it open")
+            return False
+        page = o.open(f"http://127.0.0.1:{port}/", timeout=3).read().decode("utf-8", "replace")
+        tok = re.search(r'const TOKEN = "([^"]+)"', page).group(1)
+        o.open(urllib.request.Request(f"http://127.0.0.1:{port}/api/shutdown", data=b"{}",
+                                      headers={"X-Token": tok, "Content-Type": "application/json"}), timeout=5)
+    except Exception as e:  # noqa: BLE001
+        log(f"[start] could not replace the other copy: {e}")
+        return False
+    for _ in range(40):
+        time.sleep(0.25)
+        try:
+            o.open(f"http://127.0.0.1:{port}/api/ping", timeout=0.5)
+        except Exception:  # noqa: BLE001
+            log(f"[start] replaced the other copy ({info.get('version') or 'Python version'}) on port {port}")
+            return True
+    return False
+
+
+def repair_windows_links():
+    """Shortcuts named "MO Downloader" (desktop, Start menu, start-with-Windows) and the mo-downloader:// link
+    that the Python version's launcher pointed at itself go back to the installed app."""
+    try:
+        import winreg
+        exe = sys.executable
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\mo-downloader\shell\open\command") as k:
+            if exe.lower() not in str(winreg.QueryValueEx(k, "")[0] if _reg_has(k) else "").lower():
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}" "%1"')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\mo-downloader\DefaultIcon") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}",0')
+
+        def q(x):
+            return "'" + str(x).replace("'", "''") + "'"
+        ps = ("$ws=New-Object -ComObject WScript.Shell;$n=0;"
+              "foreach($d in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'),"
+              "[Environment]::GetFolderPath('Startup'))){"
+              "$f=Join-Path $d 'MO Downloader.lnk'; if(Test-Path -LiteralPath $f){ $s=$ws.CreateShortcut($f);"
+              f"if($s.TargetPath -ne {q(exe)}){{ $bg=($d -eq [Environment]::GetFolderPath('Startup'));"
+              f"$s.TargetPath={q(exe)};$s.Arguments=$(if($bg){{'--background'}}else{{''}});"
+              f"$s.WorkingDirectory={q(Path(exe).parent)};$s.IconLocation={q(exe + ',0')};$s.Save();$n++ }} }} }};$n")
+        enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+                           capture_output=True, text=True, creationflags=0x08000000, timeout=60)
+        n = (r.stdout or "").strip()
+        if n and n != "0":
+            log(f"[start] {n} shortcut(s) pointed back at the installed app")
+    except Exception as e:  # noqa: BLE001
+        log(f"[start] shortcuts not checked: {e}")
+
+
+def _reg_has(k):
+    import winreg
+    try:
+        winreg.QueryValueEx(k, "")
+        return True
+    except OSError:
+        return False
+
+
 SERVER = None
 
 
@@ -3178,6 +4226,10 @@ def main():
         log(f"[live] stop hook not installed: {e}")
     Path(SETTINGS["outdir"]).mkdir(parents=True, exist_ok=True)
     running_port = already_running(DEFAULT_PORT)
+    if running_port and FROZEN and replace_other_copy(running_port):
+        running_port = None
+    if FROZEN and SYSTEM == "Windows":
+        threading.Thread(target=repair_windows_links, daemon=True).start()
     if running_port:
         if not BACKGROUND:
             shown = False
@@ -3201,7 +4253,8 @@ def main():
         pass
     restore_queue()
     threading.Thread(target=register_native_host, daemon=True).start()
-    for target in (scheduler_loop, subs_loop, engine_update_check, fetch_aria2_windows):
+    phone_apply()
+    for target in (scheduler_loop, subs_loop, engine_update_check, fetch_aria2_windows, clipboard_loop, update_loop):
         threading.Thread(target=target, daemon=True).start()
     print("=" * 60)
     print(f"  MO Downloader {APP_VERSION} is running:  {url}")
@@ -3280,7 +4333,7 @@ nav button.on .n{background:rgba(255,255,255,.25);color:inherit}
 .card h2{font-size:18px;margin:0 0 4px}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .grow{flex:1;min-width:0}
-input[type=text],input[type=number],select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);
+input[type=text],input[type=number],input[type=password],input[type=datetime-local],select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);
   border-radius:10px;padding:9px 12px;min-width:0}
 textarea{width:100%;min-height:150px;direction:ltr;text-align:left;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13.5px}
 input.ltr,#url{direction:ltr;text-align:left}
@@ -3354,6 +4407,16 @@ td.ltr{text-align:right}
 @media (max-width:640px){.opt.wide2{grid-column:auto}}
 footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
 @media (max-width:640px){.media{flex-direction:column}.thumb{width:100%}}
+.modal{position:fixed;inset:0;background:rgba(10,20,16,.72);display:flex;align-items:center;justify-content:center;z-index:40}
+.modal .box{background:var(--card,#fffdf7);border-radius:14px;padding:12px;max-width:min(960px,94vw);width:100%;position:relative}
+.modal video{width:100%;max-height:76vh;border-radius:10px;background:#000;display:block}
+.modal .x{position:absolute;top:-14px;inset-inline-end:-14px;border-radius:50%;width:34px;height:34px;padding:0}
+.modal h3{margin:4px 6px 10px;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#phQr svg{width:200px;height:200px;background:#fff;border-radius:10px;padding:6px}
+.langbtn{font-size:12.5px;padding:3px 10px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);max-width:min(560px,92vw);background:#7a2e2e;color:#fff;
+  padding:10px 16px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-size:14px;z-index:50;opacity:0;pointer-events:none;transition:opacity .2s}
+#toast.show{opacity:1;pointer-events:auto} #toast.ok{background:#1d6b52}
 </style>
 </head>
 <body>
@@ -3363,7 +4426,8 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
       <h1 class="brand"><img src="/logo.png" alt="" width="44" height="44"><span dir="ltr">MO <b>Downloader</b></span></h1>
       <p class="sub">نزّل أي فيديو أو ملف صوتي بالجودة التي تختارها، أو قوائم كاملة، أو تابع قنواتك تلقائياً.</p>
     </div>
-    <div class="status" id="status"></div>
+    <div><button class="small ghost langbtn" id="langBtn" translate="no"></button>
+      <div class="status" id="status"></div></div>
   </header>
 
   <nav id="nav">
@@ -3371,6 +4435,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     <button data-p="batch">عدة روابط</button>
     <button data-p="subs">متابعة القنوات <span class="n" id="n-subs">0</span></button>
     <button data-p="hist">السجل <span class="n" id="n-hist">0</span></button>
+    <button data-p="tools">أدوات</button>
     <button data-p="sites">المواقع المدعومة</button>
     <button data-p="settings">الإعدادات</button>
   </nav>
@@ -3387,6 +4452,14 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <label><input type="checkbox" id="playlist"> إذا كان الرابط قائمة تشغيل: اعرض القائمة كاملة</label>
       </div>
       <div id="msg" class="msg hidden"></div>
+      <div id="clipbar" class="msg info hidden">
+        <div>📋 نسخت رابط فيديو: <b class="ltr" id="clipurl"></b></div>
+        <div class="row" style="margin-top:8px">
+          <button class="small primary" id="clipGo">تنزيل بأفضل جودة</button>
+          <button class="small" id="clipShow">عرض الجودات</button>
+          <button class="small ghost" id="clipNo">تجاهل</button>
+        </div>
+      </div>
     </section>
 
     <section class="card hidden" id="result">
@@ -3453,8 +4526,28 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <div class="opt"><label>مجلد الحفظ</label><input type="text" id="outdir" class="ltr"></div>
       </div>
       <div class="checks">
-        <label id="c-subs"><input type="checkbox" id="subs"> تنزيل الترجمات (عربي/إنجليزي) وتضمينها</label>
+        <label id="c-subs"><input type="checkbox" id="subs"> تنزيل الترجمات</label>
         <label><input type="checkbox" id="meta" checked> تضمين الصورة المصغّرة والبيانات</label>
+        <label id="c-split"><input type="checkbox" id="splitCh"> تقسيم حسب الفصول (ملف لكل فصل)</label>
+      </div>
+      <div class="opts hidden" id="subopts">
+        <div class="opt"><label>لغات الترجمة</label><input type="text" id="subLangs" class="ltr" value="ar, en"
+          title="رموز اللغات مفصولة بفاصلة، مثل: ar, en, fr — أو all لكل اللغات"></div>
+        <div class="opt"><label>الترجمة</label>
+          <select id="subMode"><option value="both">داخل الفيديو + ملف منفصل</option><option value="embed">داخل الفيديو فقط</option>
+            <option value="file">ملف منفصل (srt) فقط</option></select></div>
+        <div class="opt checks" style="align-self:end">
+          <label><input type="checkbox" id="subAuto"> الترجمة الآلية إن لم توجد ترجمة أصلية</label>
+          <label id="c-sub3d" class="hidden"><input type="checkbox" id="sub3d"> تحويلها للعرض ثلاثي الأبعاد</label>
+        </div>
+      </div>
+      <div class="opts">
+        <div class="opt"><label>بعد التنزيل</label>
+          <select id="after"><option value="">لا شيء</option><option value="compress">ضغط لحجم محدد</option>
+            <option value="preset:mobile">تحويل للجوال (720p)</option><option value="preset:tv">تحويل للتلفاز (1080p)</option>
+            <option value="resize:480">تصغير إلى 480p</option><option value="audio:mp3">استخراج الصوت MP3</option></select></div>
+        <div class="opt hidden" id="o-afterMb"><label>الحجم المطلوب (ميغابايت)</label><input type="number" id="afterMb" min="1" value="25"></div>
+        <div class="opt"><label>ابدأ في (اختياري)</label><input type="datetime-local" id="startAt"></div>
       </div>
       <div class="go">
         <div class="pick" id="pick">اختر جودة من الجدول</div>
@@ -3582,6 +4675,34 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
     </section>
   </div>
 
+  <!-- ============ tools ============ -->
+  <div class="panel hidden" id="p-tools">
+    <section class="card">
+      <h2>أدوات التحويل</h2>
+      <p class="sub">غيّر ملفاً موجوداً على جهازك: ضغطه لحجم محدد، تغيير دقته، تحويله للجوال أو التلفاز، استخراج صوته، أو تقسيمه حسب الفصول.</p>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="tin" class="grow ltr" placeholder="مسار الملف" spellcheck="false">
+        <button class="ghost" id="tpick">اختيار ملف…</button>
+      </div>
+      <p class="sub" id="tinfo"></p>
+      <div class="opts">
+        <div class="opt"><label>العملية</label>
+          <select id="top"><option value="compress">ضغط لحجم محدد</option><option value="resize">تغيير الدقة</option>
+            <option value="preset">قالب جاهز (جوال / تلفاز)</option><option value="audio">استخراج الصوت</option>
+            <option value="chapters">تقسيم حسب الفصول</option></select></div>
+        <div class="opt" id="t-mb"><label>الحجم المطلوب (ميغابايت)</label><input type="number" id="tmb" min="1" value="25"></div>
+        <div class="opt hidden" id="t-h"><label>الدقة</label>
+          <select id="theight"><option>2160</option><option>1440</option><option selected>1080</option><option>720</option>
+            <option>480</option><option>360</option></select></div>
+        <div class="opt hidden" id="t-p"><label>القالب</label>
+          <select id="tpreset"><option value="mobile">للجوال (720p)</option><option value="tv">للتلفاز (1080p)</option></select></div>
+        <div class="opt hidden" id="t-a"><label>صيغة الصوت</label><select id="tfmt" class="audioSel"></select></div>
+      </div>
+      <div class="go"><span class="pick" id="tmsg"></span><button class="primary" id="tgo">ابدأ</button></div>
+      <p class="help">يُحفظ الناتج بجانب الملف الأصلي باسم جديد، ولا يتغيّر الأصل. ويظهر التقدّم في قائمة التنزيلات بالأسفل.</p>
+    </section>
+  </div>
+
   <!-- ============ settings ============ -->
   <div class="panel hidden" id="p-settings">
     <section class="card settings">
@@ -3616,6 +4737,77 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
         <label><input type="checkbox" id="setAuto"> تشغيل الأداة تلقائياً مع بدء الجهاز (في الخلفية، لتعمل المتابعة دائماً)</label>
       </div>
       <div class="go"><span class="pick" id="setmsg"></span><button class="primary" id="setSave">حفظ</button></div>
+    </section>
+
+    <section class="card settings">
+      <h2>مزايا إضافية</h2>
+      <div class="opts">
+        <div class="opt"><label>لغة الواجهة</label>
+          <select id="setLang"><option value="ar">العربية</option><option value="en">English</option></select></div>
+        <div class="opt"><label>حد سرعة التنزيل (كيلوبايت/ث)</label>
+          <input type="number" id="setRate" min="0" step="64" placeholder="0 = بلا حد"></div>
+      </div>
+      <div class="opts">
+        <div class="opt wide2"><label>قالب اسم الملف</label>
+          <input type="text" id="setNameTpl" class="ltr" placeholder="{title} [{id}] {quality}" spellcheck="false"></div>
+        <div class="opt"><label>قالب المجلد</label>
+          <input type="text" id="setFolderTpl" class="ltr" placeholder="{site}/{uploader}" spellcheck="false"></div>
+      </div>
+      <p class="help">الرموز: <span class="ltr">{title} {id} {uploader} {channel} {site} {date} {year} {month} {quality} {resolution} {playlist} {index}</span>.
+        اتركهما فارغين للتسمية الافتراضية. مثال: <b class="ltr" id="tplEx"></b></p>
+      <div class="checks">
+        <label><input type="checkbox" id="setNotify"> إشعار على الجهاز عند انتهاء كل تنزيل</label>
+        <label><input type="checkbox" id="setClip"> مراقبة الحافظة: عند نسخ رابط فيديو اقترح تنزيله</label>
+      </div>
+      <div class="opts">
+        <div class="opt wide2"><label>أداة الترجمة ثلاثية الأبعاد (اختياري)</label>
+          <input type="text" id="setSub3d" class="ltr" spellcheck="false" placeholder='python "C:\tools\srt_to_3d_ass.py" {file}'></div>
+      </div>
+      <p class="help">أمر يُشغَّل على كل ملف ترجمة srt بعد التنزيل عند اختيار «تحويلها للعرض ثلاثي الأبعاد». ضع <span class="ltr">{file}</span> مكان ملف الترجمة.</p>
+      <div class="go"><span class="pick" id="set2msg"></span><button class="primary" id="set2Save">حفظ</button></div>
+    </section>
+
+    <section class="card">
+      <h2>الإرسال من الجوال</h2>
+      <p class="sub">أرسل روابط من جوالك إلى البرنامج وهما على نفس شبكة الواي فاي: امسح الرمز بكاميرا الجوال، والصق الرابط، واكتب كلمة المرور.</p>
+      <div class="opts">
+        <div class="opt"><label>كلمة مرور الجوال (4–10 أرقام)</label><input type="password" id="phPin" inputmode="numeric" autocomplete="new-password"></div>
+      </div>
+      <div class="checks"><label><input type="checkbox" id="phOn"> تفعيل الاستقبال من الجوال</label></div>
+      <div class="go"><span class="pick" id="phMsg"></span>
+        <span class="row"><button class="small ghost" id="phNew">رمز جديد</button><button class="primary" id="phSave">حفظ</button></span></div>
+      <div class="row hidden" id="phBox" style="margin-top:12px;align-items:flex-start;gap:16px">
+        <div id="phQr"></div>
+        <div class="sub"><div>أو افتح هذا العنوان في متصفح الجوال:</div><b class="ltr" id="phUrl" style="word-break:break-all"></b>
+          <p class="help">في أول تفعيل قد يسأل ويندوز عن السماح للبرنامج بالشبكة: اختر «الشبكات الخاصة» فقط. «رمز جديد» يُبطل الرمز القديم.</p></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>نسخة احتياطية</h2>
+      <p class="sub">احفظ الإعدادات والقنوات المتابَعة والسجل في ملف واحد، لنقلها إلى جهاز آخر أو استرجاعها.</p>
+      <div class="checks">
+        <label><input type="checkbox" id="bkSettings" checked> الإعدادات</label>
+        <label><input type="checkbox" id="bkSubs" checked> القنوات المتابَعة</label>
+        <label><input type="checkbox" id="bkHist" checked> السجل</label>
+      </div>
+      <div class="go"><span class="pick" id="bkMsg"></span>
+        <span class="row"><button class="small" id="impBtn">استيراد من ملف…</button><button class="primary" id="expBtn">تصدير</button></span></div>
+      <input type="file" id="impFile" accept=".json,application/json" class="hidden">
+      <p class="help">الملف يحتوي إعداداتك، ولا يحتوي ملف الكوكيز. الاستيراد يضيف إلى ما عندك ولا يحذف شيئاً.</p>
+    </section>
+
+    <section class="card">
+      <h2>تحديث البرنامج</h2>
+      <p class="sub" id="updMsg"></p>
+      <div class="go"><span class="pick"></span>
+        <span class="row"><button class="small" id="updCheck">البحث عن تحديث</button>
+          <button class="primary hidden" id="updInstall">تثبيت التحديث</button></span></div>
+      <details style="margin-top:8px"><summary style="cursor:pointer">مصدر التحديثات</summary>
+        <div class="row" style="margin-top:8px"><input type="text" id="updUrl" class="grow ltr" spellcheck="false">
+          <button class="small" id="updUrlSave">حفظ</button></div>
+        <p class="help">عنوان صفحة آخر إصدار (GitHub API). يفحصه البرنامج مرة يومياً وينزّل الإصدار الجديد ويتحقق من بصمته قبل عرض التثبيت.</p>
+      </details>
     </section>
 
     <section class="card">
@@ -3726,7 +4918,77 @@ footer{color:var(--muted);font-size:12.5px;margin-top:20px;text-align:center}
   <footer>MO Downloader · يعمل محلياً على جهازك فقط، ولا يتجاوز المحتوى المحمي بتقنيات منع النسخ.</footer>
 </div>
 
+<div id="pv" class="modal hidden"><div class="box"><button class="small x" id="pvx" title="إغلاق">✕</button>
+  <h3 id="pvt" translate="no"></h3><video id="pvv" controls preload="metadata"></video></div></div>
 <script>
+// ---------- English interface: Arabic is the source language; texts are swapped as they appear on the page
+const LANG = "__LANG__";
+const I18N = {"(تُخطّي":"(skipped","(في Edge:":"(in Edge:","(مسرّع)":"(accelerated)","(مقطع":"(clip","(موجود سابقاً)":"(already there)","(نسخة معدّلة خصيصاً لسفاري).":"(a version adjusted especially for Safari) is created.","(يُحدَّث تلقائياً يومياً)":"(updated automatically every day)","(يُحدَّث عند كل تشغيل)":"(updated at every start)","(يُعرض أحدث":"(showing the latest",") للصور والمعارض. والمواقع غير الموجودة في القائمة كثيراً ما تعمل أيضاً عن طريق البحث العام في الصفحة، أو التقاط البث من إضافة المتصفح.":") for images and galleries. Sites not in the list often work too, through the general page search or by catching the stream with the browser extension.",") للفيديو والصوت، والثاني (":") for video and audio, and the second (",") مع الحفاظ على أسماء الملفات وترتيبها.":") keeping the file names and their order.","+ أفضل صوت":"+ best audio",". اتركهما فارغين للتسمية الافتراضية. مثال:":". Leave both empty for the default naming. Example:",". يمكنك تنزيله مجدداً.":"quality. You can download it again.","0 = بلا حد":"0 = no limit","12 ساعة":"12 hours","3 ساعات":"3 hours","6 ساعات":"6 hours","Deno غير موجود (يوتيوب محدود)":"Deno missing (YouTube limited)","FLAC (بدون فقد)":"FLAC (lossless)","MKV (يقبل كل الترميزات)":"MKV (accepts all codecs)","MO Downloader · يعمل محلياً على جهازك فقط، ولا يتجاوز المحتوى المحمي بتقنيات منع النسخ.":"MO Downloader · runs locally on your computer only, and does not bypass copy-protected content.","MP4 (الأكثر توافقاً)":"MP4 (most compatible)","ffmpeg غير موجود":"ffmpeg missing","http://host:port أو socks5://user:pass@host:port":"http://host:port or socks5://user:pass@host:port","· الإعدادات":"· settings","· السجل:":"· history:","· القنوات:":"· channels:","· المحرك الثاني":"· The second engine","· المدة":"· duration","· انتحال بصمة المتصفح:":"· Browser impersonation:","· بلا فصول":"· no chapters","· محرك التنزيل":"· download engine","· مقطع":"· clip","» غير صحيحة. اكتبه مثل 1:30 أو 1:02:45.":"» is wrong. Write it like 1:30 or 1:02:45.","،":",","آخر 10 فيديوهات + الجديد":"Last 10 videos + new","آخر 3 فيديوهات + الجديد":"Last 3 videos + new","آخر 30 فيديو + الجديد":"Last 30 videos + new","آخر فحص:":"Last check:","أثناء عمل الأداة، وتُحفظ الفيديوهات في مجلد باسم كل قناة. لتعمل المتابعة دائماً فعّل «التشغيل مع بدء الجهاز» من الإعدادات.":"while the tool is running, and videos are saved in a folder named after each channel. To keep following at all times, turn on «Start with the computer» in the settings.","أداة الترجمة ثلاثية الأبعاد (اختياري)":"3D subtitle tool (optional)","أداة التسريع (aria2) غير متوفرة في هذه النسخة، فتعمل التنزيلات باتصال واحد.":"The acceleration tool (aria2) is not available in this version, so downloads use a single connection.","أداة غير معروفة.":"Unknown tool.","أدوات":"Tools","أدوات التحويل":"Conversion tools","أرسل إلى الكمبيوتر":"Send to computer","أرسل روابط من جوالك إلى البرنامج وهما على نفس شبكة الواي فاي: امسح الرمز بكاميرا الجوال، والصق الرابط، واكتب كلمة المرور.":"Send links from your phone to the program while both are on the same Wi-Fi: scan the code with the phone camera, paste the link and enter the password.","أفضل جودة":"Best quality","أفضل جودة متاحة":"Best available quality","أمر الترجمة ثلاثية الأبعاد يجب أن يحتوي {file} مكان ملف الترجمة.":"The 3D subtitle command must contain {file} in place of the subtitle file.","أمر يُشغَّل على كل ملف ترجمة srt بعد التنزيل عند اختيار «تحويلها للعرض ثلاثي الأبعاد». ضع":"A command run on each srt subtitle file after the download when «Convert them for 3D viewing» is chosen. Put","أو افتح هذا العنوان في متصفح الجوال:":"Or open this address in the phone's browser:","أو الأفضل: اختر «ملف cookies.txt» أو Firefox من الإعدادات.":"or better: choose «cookies.txt file» or Firefox in the settings.","أُرسل ✓ — بدأ التنزيل على الكمبيوتر":"Sent ✓ — the download started on the computer","أُضيف":"Added","أُلغي":"Cancelled","أُلغي الفحص":"Check cancelled","أُوقف التسجيل وحُفظ ✓":"Recording stopped and saved ✓","إذا توقف موقع عن العمل فجأة، فغالباً غيّر نظامه: حدّث المحرك ثم أعد تشغيل البرنامج. وإن لم يُحل، جرّب القناة اليومية.":"If a site suddenly stops working, it probably changed its system: update the engine, then restart the program. If that doesn't help, try the nightly channel.","إذا فشل الاتصال المباشر بموقع، تعيد الأداة المحاولة تلقائياً عبر البروكسي، في عرض الجودات وفي التنزيل.":"If the direct connection to a site fails, the tool retries automatically through the proxy, both when showing qualities and when downloading.","إذا كان الرابط قائمة تشغيل: اعرض القائمة كاملة":"If the link is a playlist: show the whole list","إشعار على الجهاز عند انتهاء كل تنزيل":"A notification on the computer when each download finishes","إصدارات Chrome وEdge الحديثة على ويندوز تشفّر الكوكيز بطريقة تمنع البرامج الأخرى من قراءتها.":"Recent Chrome and Edge versions on Windows encrypt cookies in a way that prevents other programs from reading them.","إضافة إلى الطابور":"Add to queue","إضافة البيانات":"Adding metadata","إضافة المتصفح":"Browser extension","إطار/ث":"fps","إظهار MO Downloader":"Show MO Downloader","إظهار الملف":"Show file","إظهار الملف السابق":"Show the previous file","إعادة المحاولة":"Retry","إعادة المحاولة بالبث الذي التُقط من الصفحة…":"Retrying with the stream caught on the page…","إغلاق":"Close","إلغاء":"Cancel","إلغاء الكل":"Cancel all","إلغاء المتابعة":"Unfollow","إلى":"To","إيقاف الأداة":"Stop the tool","إيقاف مؤقت":"Pause","إيقاف مؤقت للكل":"Pause all","ابحث باسم الموقع… (مثل instagram أو tiktok أو vimeo)":"Search by site name… (like instagram, tiktok or vimeo)","ابحث بالعنوان أو القناة أو الموقع…":"Search by title, channel or site…","ابدأ":"Start","ابدأ في (اختياري)":"Start at (optional)","ابدأ من":"Start from","احفظ الإعدادات والقنوات المتابَعة والسجل في ملف واحد، لنقلها إلى جهاز آخر أو استرجاعها.":"Save the settings, followed channels and history in one file, to move them to another computer or restore them.","اختبار البروكسي":"Test proxy","اختبر رابطاً":"Test a link","اختبر هذا الرابط":"Test this link","اختر الدقة.":"Choose the resolution.","اختر المجلد من النافذة التي فُتحت. إن لم تظهر أمامك فابحث عنها في شريط المهام.":"Choose the folder in the window that opened. If it isn't in front of you, look for it in the taskbar.","اختر جودة من الجدول":"Choose a quality from the table","اختر كلمة مرور للجوال أولاً (من 4 إلى 10 أرقام).":"Choose a phone password first (4 to 10 digits).","اختر مجلد حفظ التنزيلات":"Choose the downloads save folder","اختر ملف فيديو أو صوت":"Choose a video or audio file","اخترت «ملف cookies.txt» لكن لم تحمّل الملف بعد. حمّله من تبويب الإعدادات.":"You chose «cookies.txt file» but haven't loaded the file yet. Load it from the settings tab.","اختيار مجلد":"Choose folder","اختيار ملف…":"Choose file…","استئناف الكل":"Resume all","استخدم «ملف cookies.txt» أو Firefox من الإعدادات بدلاً منها.":"Use «cookies.txt file» or Firefox in the settings instead.","استخراج الصوت":"Extract audio","استخراج الصوت (":"Extract audio (","استخراج الصوت MP3":"Extract audio MP3","استيراد من ملف…":"Import from file…","اسم القناة":"Channel name","اضغط":"Press","اضغط Ctrl+V داخل خانة الرابط.":"Press Ctrl+V inside the link field.","اضغط «تجهيز مجلد الإضافة» بالأسفل، فيُنشأ مجلد باسم":"Press «Prepare the extension folder» below; a folder named","اضغط «تحميل إضافة غير مُعبأة» (Load unpacked) واختر المجلد من الخطوة الأولى.":"Press «Load unpacked» and choose the folder from the first step.","اضغط مرة أخرى للتأكيد":"Press again to confirm","اكتب الحجم المطلوب بالميغابايت (والملف يجب أن يكون فيديو أو صوتاً له مدة).":"Enter the target size in MB (and the file must be a video or audio with a duration).","اكتب الوقت مثل 1:30 أو 1:02:45. اترك «إلى» فارغاً للتنزيل حتى النهاية. بدون القص الدقيق قد يبدأ المقطع قبل الوقت المحدد بثوانٍ قليلة.":"Write the time like 1:30 or 1:02:45. Leave «To» empty to download to the end. Without a precise cut the clip may start a few seconds early.","اكتب عنوان البروكسي أولاً.":"Enter the proxy address first.","اكتمل التنزيل ✓":"Download finished ✓","اكتمل مع ملاحظات":"Finished with notes","اكتمل ✓":"Done ✓","الآن":"now","الأدوات تحتاج ffmpeg.":"The tools need ffmpeg.","الأعلى":"Highest","الأنواع المدعومة: http و https و socks5. اترك الخانة فارغة لإيقاف البروكسي. قص جزء من الفيديو لا يعمل عبر بروكسي socks5.":"Supported types: http, https and socks5. Leave the field empty to turn the proxy off. Cutting part of a video does not work through a socks5 proxy.","الإرسال من الجوال":"Send from phone","الإصدار":"Version","الإصدار الحالي":"Current version","الإعدادات":"Settings","البث":"Streams","البث المباشر المسجَّل أيضاً":"Recorded live streams too","البث الملتقط من الصفحة":"the stream caught on the page","البث لم يبدأ بعد. أعد المحاولة عند بدايته، أو استخدم «تسجيل البث» لتنتظره الأداة.":"The stream hasn't started yet. Try again when it starts, or use «Record stream» so the tool waits for it.","البحث عن تحديث":"Check for update","البرنامج لا يستجيب — هل أُغلق؟":"The program is not responding — was it closed?","البروكسي":"the proxy","البروكسي (عند تعذّر الوصول إلى موقع)":"Proxy (when a site can't be reached)","البصمة لا تطابق — لن يُثبَّت هذا الملف.":"The fingerprint doesn't match — this file won't be installed.","الترجمة":"Subtitles","الترجمة الآلية إن لم توجد ترجمة أصلية":"Automatic subtitles if no original ones exist","التردد":"Sample rate","الترميز":"Codec","التسريع متوقف على هذا الجهاز":"Acceleration is off on this computer","التسريع يقسم الملف إلى أجزاء تُحمَّل معاً، ويتيح الإيقاف المؤقت والاستئناف من نفس النقطة. لا يعمل مع بروكسي socks5.":"Acceleration splits the file into parts downloaded together, and allows pausing and resuming from the same point. It doesn't work with a socks5 proxy.","التنزيلات":"Downloads","الجودة":"Quality","الجودة لكل العناصر":"Quality for all items","الحجم":"Size","الحجم المطلوب (ميغابايت)":"Target size (MB)","الحجم صغير جداً لمدة هذا الفيديو — أقل حجم معقول تقريباً":"The size is too small for this video's length — the smallest reasonable size is about","الحجم لا يطابق (":"The size doesn't match (","الدقة":"Resolution","الرابط مفقود.":"The link is missing.","الرموز:":"Tokens:","السجل":"History","السجل يمنع تكرار التنزيل في القوائم والدفعات والمتابعات. لإعادة تنزيل عنصر بتلك الطرق احذفه من السجل أولاً، أما التنزيل العادي من تبويب «تنزيل» فيعمل دائماً.":"The history prevents downloading the same item twice in lists, batches and followed channels. To download such an item again that way, delete it from the history first; a normal download from the «Download» tab always works.","الصق الروابط (كل رابط في سطر، أو أي نص يحتوي روابط)، فتُضاف كلها إلى طابور التنزيل وتنزل تباعاً.":"Paste the links (one per line, or any text containing links); they are all added to the download queue and downloaded one after another.","الصق رابطاً أولاً.":"Paste a link first.","الصيغة":"Format","الطريقة التي نجحت:":"Method that worked:","العربية":"Arabic","العملية":"Operation","العنصر":"item","الفيديو محذوف أو غير متاح، أو الرابط غير صحيح.":"The video was deleted or is unavailable, or the link is wrong.","الفيديوهات الجديدة فقط من الآن":"Only new videos from now","القالب":"Target","القالب يحتوي رموزاً غير مسموحة في أسماء الملفات: < > : \" | ? *":"The template contains characters not allowed in file names: < > : \" | ? *","القنوات المتابَعة":"Followed channels","الكوكيز (للمواقع التي تطلب تسجيل دخول)":"Cookies (for sites that require login)","المتابعة غير موجودة.":"Follow not found.","المتصفح مفتوح ويقفل ملف الكوكيز. أغلقه تماماً (من أيقونته بجانب الساعة أيضاً) ثم أعد المحاولة،":"The browser is open and locks the cookies file. Close it completely (also from its icon next to the clock) and try again,","المتصفح واختر من «فيديوهات التُقطت من هذه الصفحة».":"and choose from «Videos caught on this page».","المجلد غير موجود — ربما فُصل القرص أو نُقل المجلد.":"The folder doesn't exist — the drive may be disconnected or the folder moved.","المجموع:":"Total:","المحرك الأول":"The first engine","المحرك الأول (":"The first engine (","المحرك الأول (yt-dlp):":"First engine (yt-dlp):","المحرك الثاني (gallery-dl)":"the second engine (gallery-dl)","المحرك الثاني (gallery-dl) غير متوفر في هذه النسخة.":"The second engine (gallery-dl) is not available in this version.","المحرك الثاني (gallery-dl):":"Second engine (gallery-dl):","المحرك محدّث إلى آخر إصدار":"The engine is up to date with the latest","المختار:":"Selected:","المعرّف":"ID","المقاطع القصيرة (Shorts) أيضاً":"Shorts too","الملف غير موجود — اختر ملفاً من جهازك أو من السجل.":"The file doesn't exist — choose a file from your computer or from the history.","الملف غير موجود — ربما نُقل أو حُذف أو غُيّر اسمه.":"The file doesn't exist — it may have been moved, deleted or renamed.","الملف غير موجود.":"The file doesn't exist.","الملف ليس نسخة احتياطية صالحة.":"The file is not a valid backup.","الملف يحتوي إعداداتك، ولا يحتوي ملف الكوكيز. الاستيراد يضيف إلى ما عندك ولا يحذف شيئاً.":"The file contains your settings, not the cookies file. Importing adds to what you have and deletes nothing.","المهمة غير موجودة.":"Job not found.","المواقع المدعومة":"Supported sites","الموقع رفض الاتصال لأنه يحمي نفسه من البرامج الآلية. جرّبت الأداة انتحال بصمة متصفح حقيقي.":"The site refused the connection because it protects itself from automated programs. The tool tried impersonating a real browser.","الموقع رفض الاتصال — إعادة المحاولة بانتحال بصمة متصفح حقيقي…":"The site refused the connection — retrying as a real browser…","الموقع يطلب تسجيل الدخول — إعادة المحاولة بكوكيز المتصفح…":"The site requires login — retrying with the browser's cookies…","الموقع يطلب تسجيل الدخول: اختر «ملف cookies.txt» أو Firefox من الإعدادات ثم أعد المحاولة.":"The site requires login: choose «cookies.txt file» or Firefox in the settings, then try again.","النهاية":"the end","انتحال بصمة المتصفح":"browser impersonation","بث لم يبدأ بعد — ستنتظر الأداة بدايته ثم تسجّله":"A stream that hasn't started yet — the tool will wait for it to start, then record it","بث مباشر · من الآن":"Live stream · from now","بث مباشر · من البداية":"Live stream · from the start","بجودة":"in","بدأ تنزيل آخر الفيديوهات.":"Downloading the latest videos has started.","بدأت المتابعة — سيُنزَّل كل فيديو جديد":"Following started — every new video will be downloaded","بدل":"instead of","بدون":"None","بدون تحويل (الأصل)":"No conversion (original)","بدون عنوان":"Untitled","بروكسي:":"Proxy:","بعد التنزيل":"After download","تثبيت التحديث":"Install update","تجاهل":"Dismiss","تجهيز مجلد إضافة Safari":"Prepare the Safari extension folder","تجهيز مجلد الإضافة":"Prepare the extension folder","تحديث البرنامج":"Program update","تحديث المحرك الآن":"Update engine now","تحديث المحرك جاهز — أعد تشغيل الأداة":"Engine update ready — restart the tool","تحديث جاهز":"Update ready","تحميل ملف الكوكيز":"Load cookies file","تحويل":"Convert","تحويل الترجمة":"Converting subtitles","تحويل الصوت":"Converting audio","تحويل الصوت إلى":"Convert audio to","تحويل للتلفاز (1080p)":"Convert for TV (1080p)","تحويل للجوال (720p)":"Convert for phone (720p)","تحويلها للعرض ثلاثي الأبعاد":"Convert them for 3D viewing","تحويل…":"Convert…","تخطّي ما نزّلته سابقاً":"Skip what I downloaded before","ترميز الصوت":"Audio codec","ترميز الفيديو":"Video codec","تسجيل دخولك":"your login","تسجيل دخولك من إضافة المتصفح":"Your login from the browser extension","تسريع التنزيل (عدة اتصالات في نفس الوقت)":"Download acceleration (several connections at once)","تسريع ✓":"Acceleration ✓","تشغيل الأداة تلقائياً مع بدء الجهاز (في الخلفية، لتعمل المتابعة دائماً)":"Start the tool automatically with the computer (in the background, so following always works)","تصدير":"Export","تصغير إلى 480p":"Shrink to 480p","تصفّح…":"Browse…","تضمين الترجمة":"Embedding subtitles","تضمين الصورة المصغّرة":"Embedding the thumbnail","تضمين الصورة المصغّرة والبيانات":"Embed thumbnail and metadata","تعذّر":"failed","تعذّر إنشاء مجلد التنزيلات:":"Couldn't create the downloads folder:","تعذّر الاتصال عبر هذا البروكسي. تأكد من العنوان والمنفذ (واسم المستخدم وكلمة المرور إن وُجدت) وأنه يعمل.":"Couldn't connect through this proxy. Check the address and port (and username and password if any) and that it works.","تعذّر البحث عن تحديث (HTTP":"Couldn't look for an update (HTTP","تعذّر البحث عن تحديث:":"Couldn't look for an update:","تعذّر التسريع على هذا الجهاز — إكمال التنزيل بالطريقة العادية…":"Acceleration failed on this computer — finishing the download the normal way…","تعذّر التنزيل":"Couldn't download","تعذّر التنزيل.":"Couldn't download.","تعذّر الفتح:":"Couldn't open:","تعذّر النسخ":"Couldn't copy","تعذّر الوصول إلى الموقع من شبكتك (قد يكون محجوباً أو الاتصال مقطوعاً).":"The site can't be reached from your network (it may be blocked or the connection is down).","تعذّر تحديث المحرك:":"Couldn't update the engine:","تعذّر تنزيل التحديث:":"Couldn't download the update:","تعذّر تنزيل بعض العناصر (قد تكون خاصة أو محذوفة أو تتطلب تسجيل دخول):":"Some items couldn't be downloaded (they may be private, deleted or require login):","تعذّر فتح نافذة اختيار المجلد. اكتب المسار في الخانة يدوياً.":"Couldn't open the folder selection window. Type the path in the field manually.","تعذّر فتح نافذة اختيار الملف. الصق مسار الملف في الخانة يدوياً.":"Couldn't open the file selection window. Paste the file path in the field manually.","تعذّر قراءة الرابط.":"Couldn't read the link.","تغيير الحاوية":"Changing the container","تغيير الدقة":"Change resolution","تفعيل":"Enable","تفعيل الاستقبال من الجوال":"Accept links from the phone","تقسيم إلى":"Split into","تقسيم حسب الفصول":"Split by chapters","تقسيم حسب الفصول (ملف لكل فصل)":"Split by chapters (one file per chapter)","تم إيقاف MO Downloader":"MO Downloader has stopped","تم تنزيل:":"Downloaded:","تم حفظ ملف الكوكيز (":"Cookies file saved (","تنزيل":"Download","تنزيل الترجمات":"Download subtitles","تنزيل الترجمات وتضمينها":"Download and embed subtitles","تنزيل القائمة":"Download the list","تنزيل بأفضل جودة":"Download in best quality","تنزيل كل الملفات":"Download all files","تنزيل مجدداً":"Download again","تُحفظ في مجلد باسم القائمة، مرقّمة بترتيبها.":"Saved in a folder named after the list, numbered in order.","تُخطّي":"skipped","تُظهر زر تنزيل فوق أي فيديو في المتصفح، وزراً في شريط الأدوات، وخياراً في قائمة الزر الأيمن، بدون نسخ أي رابط.":"Shows a download button over any video in the browser, a button in the toolbar, and an item in the right-click menu, without copying any link.","تُفحص القنوات كل":"Channels are checked every","ثبّت Deno ثم أعد تشغيل الأداة.":"Install Deno, then restart the tool.","ثبّت أيقونة MO في شريط الأدوات من زر الإضافات (قطعة البازل).":"Pin the MO icon to the toolbar from the extensions button (the puzzle piece).","جارٍ اختبار الرابط…":"Testing the link…","جارٍ الاختبار…":"Testing…","جارٍ البحث عن إصدار جديد…":"Looking for a new version…","جارٍ التحديث…":"Updating…","جارٍ التحضير":"Preparing","جارٍ التحقق من تحديثات المحرك…":"Checking for engine updates…","جارٍ التحقق…":"Checking…","جارٍ التنزيل":"Downloading","جارٍ التنزيل بالمحرك الثاني (gallery-dl)…":"Downloading with the second engine (gallery-dl)…","جارٍ التنزيل بالمحرك الثاني ·":"Downloading with the second engine ·","جارٍ الفحص…":"Checking…","جارٍ المعالجة":"Processing","جارٍ تحميل القائمة…":"Loading the list…","جارٍ تسجيل البث المباشر":"Recording the live stream","جارٍ تسجيل البث المباشر…":"Recording the live stream…","جارٍ تسجيل البث من بدايته…":"Recording the stream from its start…","جارٍ تنزيل الإصدار":"Downloading version","جارٍ قراءة الصفحة واستخراج كل الجودات…":"Reading the page and extracting all qualities…","جارٍ قراءة القناة…":"Reading the channel…","جاهز للتثبيت.":"is ready to install.","جديد":"new","جرّبت الأداة البروكسي أيضاً ولم ينجح؛ تأكد أن البروكسي يعمل من «اختبار البروكسي» في الإعدادات.":"The tool tried the proxy too and it didn't work; check that the proxy works with «Test proxy» in the settings.","جودة":"qualities","جودة الصوت بعد التحويل":"Audio quality after conversion","حتى":"up to","حتى 1080p":"Up to 1080p","حتى 1440p":"Up to 1440p","حتى 360p":"Up to 360p","حتى 480p":"Up to 480p","حتى 4K":"Up to 4K","حتى 720p":"Up to 720p","حد سرعة التنزيل (كيلوبايت/ث)":"Download speed limit (KB/s)","حذف":"Delete","حذف من السجل":"Delete from history","حفظ":"Save","خروج":"Quit","دائماً":"Always","دائماً لكل التنزيلات":"Always, for every download","داخل الفيديو + ملف منفصل":"Inside the video + separate file","داخل الفيديو فقط":"Inside the video only","دفعة ·":"Batch ·","دفعة روابط":"Batch of links","دمج الصورة والصوت":"Merging picture and sound","رابط":"links","رابط إلى الطابور. تابع التقدّم في قائمة التنزيلات بالأسفل.":"links to the queue. Follow the progress in the downloads list below.","رابط فيديو في الحافظة":"Video link on the clipboard","رابط من الجوال":"Link from phone","رمز جديد":"New code","رموز اللغات مفصولة بفاصلة، مثل: ar, en, fr — أو all لكل اللغات":"Language codes separated by commas, like: ar, en, fr — or all for every language","رموز غير معروفة في القالب:":"Unknown tokens in the template:","روابط القوائم: نزّل القائمة كاملة":"Playlist links: download the whole list","ساعات":"hours","ساعة":"hour","سبق أن نزّلت هذا الفيديو في":"You already downloaded this video on","سجل التنزيلات":"Download history","سجّل دخولك في الموقع من المتصفح، ثم نزّل الفيديو من زر إضافة المتصفح لتستخدم الأداة تسجيل دخولك.":"Log in to the site in your browser, then download the video with the browser extension's button so the tool uses your login.","سجّل من الآن":"Record from now","سجّل من بداية البث (إن أتاحه الموقع)":"Record from the start of the stream (if the site allows)","سفاري يحذف الامتداد المؤقت عند إغلاقه أو بعد ٢٤ ساعة، فتكرر الخطوة ٣. وفي سفاري لا يتوفر «تمرير تنزيلات المتصفح» لأن سفاري لا يسمح للإضافات بذلك.":"Safari removes a temporary extension when it closes or after 24 hours, so repeat step 3. In Safari «Hand browser downloads to the app» is not available because Safari doesn't allow extensions to do it.","سيُنزَّل كل فيديو جديد تلقائياً.":"Every new video will be downloaded automatically.","صفحة الإصدارات غير متاحة للبرنامج (المستودع خاص) — حدّث يدوياً من صفحة الإصدارات.":"The releases page isn't available to the program (the repository is private) — update manually from the releases page.","صوت":"Audio","صوت MP3":"MP3 audio","صوت ·":"Audio ·","صوت فقط":"Audio only","صور ومعارض)":"images and galleries)","صورة فقط بأعلى الدقّات (4K/1080p…)؛ ستُدمج تلقائياً مع أفضل صوت متاح.":"Picture only at the highest resolutions (4K/1080p…); it is merged automatically with the best available audio.","صيغة الصوت":"Audio format","صيغة الصوت (عند اختيار صوت فقط)":"Audio format (when audio only is chosen)","صيغة الفيديو":"Video format","صيغة الوقت «":"The time format «","صيغة ملف الفيديو":"Video file format","ضع رابط القناة أو القائمة.":"Enter the channel or list link.","ضع رابط قناة أو قائمة تشغيل.":"Enter a channel or playlist link.","ضع رابط قناة يوتيوب (مثل youtube.com/@name) أو قائمة تشغيل، وستنزّل الأداة كل فيديو جديد فيها تلقائياً.":"Enter a YouTube channel link (like youtube.com/@name) or a playlist, and the tool will download every new video in it automatically.","ضع رابطاً أولاً.":"Enter a link first.","ضع رابطاً يبدأ بـ http أو https.":"Enter a link starting with http or https.","ضغط إلى":"Compress to","ضغط لحجم محدد":"Compress to a set size","طريقة فتح البرنامج":"How to open the program","عدة روابط":"Multiple links","عدة روابط دفعة واحدة":"Several links at once","عدد الاتصالات لكل ملف":"Connections per file","عدد التنزيلات في نفس الوقت":"Downloads at the same time","عرض الجودات":"Show qualities","عرض المزيد":"Show more","عن الأداة":"About","عند الفشل":"On failure","عند فشل الاتصال المباشر فقط (موصى به)":"Only when the direct connection fails (recommended)","عنصر":"items","عنصر).":"items).","عنوان البروكسي":"Proxy address","عنوان البروكسي يجب أن يبدأ بـ http:// أو https:// أو socks5://":"The proxy address must start with http://, https:// or socks5://","عنوان التحديثات يجب أن يبدأ بـ https://":"The update address must start with https://","عنوان الفيديو":"Video title","عنوان الفيديو [dQw4w9WgXcQ] 1080p":"Video title [dQw4w9WgXcQ] 1080p","عنوان صفحة آخر إصدار (GitHub API). يفحصه البرنامج مرة يومياً وينزّل الإصدار الجديد ويتحقق من بصمته قبل عرض التثبيت.":"Address of the latest-release page (GitHub API). The program checks it once a day, downloads the new version and verifies its fingerprint before offering to install.","غير متاح":"not available","غير متوفر":"not available","غيّر ملفاً موجوداً على جهازك: ضغطه لحجم محدد، تغيير دقته، تحويله للجوال أو التلفاز، استخراج صوته، أو تقسيمه حسب الفصول.":"Change a file already on your computer: compress it to a set size, change its resolution, convert it for phone or TV, extract its audio, or split it by chapters.","فتح الرابط":"Open link","فتح المجلد":"Open folder","فتح الملف في مشغّل الجهاز":"Open the file in the computer's player","فتح مجلد التنزيلات":"Open downloads folder","فتح مجلد الحفظ":"Open save folder","فحص الآن":"Check now","فحص القنوات المتابَعة كل":"Check followed channels every","فحص الكل الآن":"Check all now","فشل":"Failed","فشل ffmpeg:":"ffmpeg failed:","فشل الاتصال المباشر — إعادة المحاولة عبر البروكسي…":"The direct connection failed — retrying through the proxy…","فشل الفحص:":"Check failed:","فصول":"chapters","فعّل «وضع المطوّر» (Developer mode) من أعلى الصفحة.":"Turn on «Developer mode» at the top of the page.","في Chrome أو Edge أو Brave أو Opera افتح صفحة الإضافات بكتابة هذا العنوان في شريط العنوان:":"In Chrome, Edge, Brave or Opera open the extensions page by typing this address in the address bar:","في Safari على الماك":"In Safari on the Mac","في Safari: الإعدادات ← متقدم ← فعّل «إظهار ميزات مطوّري الويب».":"In Safari: Settings ← Advanced ← turn on «Show features for web developers».","في أول تفعيل قد يسأل ويندوز عن السماح للبرنامج بالشبكة: اختر «الشبكات الخاصة» فقط. «رمز جديد» يُبطل الرمز القديم.":"On first use Windows may ask whether to allow the program on the network: choose «Private networks» only. «New code» cancels the old one.","في الإعدادات ← الامتدادات: فعّل MO Downloader، ثم «تعديل مواقع الويب» واجعل «مواقع الويب الأخرى» على «السماح». بدون هذا لا تستطيع الإضافة الوصول إلى البرنامج.":"In Settings ← Extensions: turn on MO Downloader, then «Edit Websites» and set «Other websites» to «Allow». Without this the extension can't reach the program.","في الطابور":"in queue","في الطابور — سيكمل من حيث توقف":"In queue — will continue where it stopped","في الطابور — يكمل من الجلسة السابقة":"In queue — continuing from the previous session","في متصفح الإنترنت":"In the web browser","فيديو":"Video","فيديو ·":"videos ·","فيديو بصوت":"Video with audio","فيديو عالي الجودة":"High-quality video","فيُنشأ مجلد":"and a folder","فُتح ملف التحديث — اسحب التطبيق إلى مجلد التطبيقات واستبدل القديم.":"The update file was opened — drag the app into the Applications folder and replace the old one.","فُتح ملف التحديث.":"The update file was opened.","قائمة":"List","قائمة ·":"List ·","قائمة التشغيل":"Playlist","قائمة تشغيل":"Playlist","قالب اسم الملف":"File name template","قالب اسم الملف يجب أن يحتوي {title} أو {id} حتى لا تتشابه أسماء الملفات.":"The file name template must contain {title} or {id} so file names don't clash.","قالب المجلد":"Folder template","قالب جاهز (جوال / تلفاز)":"Ready-made target (phone / TV)","قص الفيديو يحتاج ffmpeg.":"Cutting a video needs ffmpeg.","قص جزء فقط":"Cut a part only","قص جزء متاح للفيديو الواحد فقط، وليس للقوائم.":"Cutting a part is available for a single video only, not for lists.","قص دقيق بالثانية (أبطأ)":"Precise cut to the second (slower)","قناة":"channel","قناة التحديث":"Update channel","قُرئ الرابط بطريقة:":"The link was read with:","كلمة المرور":"Password","كلمة المرور غير صحيحة.":"Wrong password.","كلمة مرور الجوال (4–10 أرقام)":"Phone password (4–10 digits)","كلمة مرور الجوال: من 4 إلى 10 أرقام.":"Phone password: 4 to 10 digits.","كما هي":"As is","كما هي من الموقع":"As provided by the site","كوكيز:":"Cookies:","لا تتوفر نافذة اختيار المجلدات على هذا النظام؛ اكتب المسار يدوياً.":"No folder selection window is available on this system; type the path manually.","لا تحذف المجلد بعد التثبيت، فالمتصفح يقرأ الإضافة منه. وعند تحديث الأداة اضغط «تجهيز مجلد الإضافة» مرة أخرى ثم زر التحديث في صفحة الإضافات.":"Don't delete the folder after installing: the browser reads the extension from it. When the tool is updated, press «Prepare the extension folder» again, then the update button on the extensions page.","لا توجد ترجمات لهذا الفيديو":"No subtitles for this video","لا توجد تنزيلات بعد.":"No downloads yet.","لا توجد صيغ من هذا النوع.":"No formats of this kind.","لا توجد فصول في هذا الملف.":"There are no chapters in this file.","لا توجد متابعات بعد.":"No followed channels yet.","لا جديد":"nothing new","لا جديد — كل العناصر نُزّلت سابقاً":"Nothing new — every item was downloaded before","لا روابط بعد":"No links yet","لا شيء":"Nothing","لا نتائج.":"No results.","لا يدعمه":"doesn't support it","لا يمكن معاينة هذا الملف داخل النافذة — استخدم «تشغيل».":"This file can't be previewed inside the window — use «Play».","لا يوجد تحديث جاهز.":"No update is ready.","لا يوجد دعم خاص — يُجرَّب البحث العام في الصفحة":"no dedicated support — the general page search is tried","لا يوجد على جهازك برنامج يفتح هذا النوع من الملفات.":"There is no program on your computer that opens this type of file.","لا يوجد في القائمة — جرّب «اختبر هذا الرابط» فكثير من المواقع تعمل بالبحث العام.":"Not in the list — try «Test this link»: many sites work through the general search.","لا يوجد فيديو يفهمه المحرك الأول — المحاولة بالمحرك الثاني (gallery-dl)…":"No video the first engine understands — trying the second engine (gallery-dl)…","لا يوجد ملف بعد":"No file yet","لا يُستخدم":"Not used","لديك أحدث إصدار (":"You have the latest version (","لصق":"Paste","لغات الترجمة":"Subtitle languages","لغة الواجهة":"Interface language","للتلفاز (1080p)":"For TV (1080p)","للجوال (720p)":"For phone (720p)","لم أجد أي رابط.":"No link found.","لم أجد أي رابط. ضع كل رابط في سطر.":"No link found. Put each link on its own line.","لم تنزّل شيئاً بعد.":"You haven't downloaded anything yet.","لم يُعثر على":"Not found:","لم يُعثر على فيديو أو ملفات في هذا الرابط.":"No video or files were found at this link.","لم يُعثر على فيديو يفهمه المحرك في هذه الصفحة. شغّل الفيديو في المتصفح، ثم افتح نافذة إضافة":"No video the engine understands was found on this page. Play the video in the browser, then open the browser extension window","لم يُعثر على ملفات في هذا الرابط.":"No files were found at this link.","لم يُفحص بعد":"Not checked yet","لمواقع تطلب تسجيل دخول (مثل القوائم الخاصة أو الفيديوهات المقيّدة بالعمر): ثبّت في متصفحك إضافة تصدير الكوكيز بصيغة cookies.txt (في متجر إضافات Chrome ابحث عن: Get cookies.txt LOCALLY)، افتح الموقع وأنت مسجّل الدخول، صدّر الملف، ثم اختر «ملف cookies.txt» واضغط «تحميل ملف الكوكيز». يُحفظ على جهازك فقط. لا ترسله لأحد لأنه يعادل تسجيل دخولك.":"For sites that require login (like private lists or age-restricted videos): install a browser extension that exports cookies in cookies.txt format (in the Chrome Web Store search for: Get cookies.txt LOCALLY), open the site while logged in, export the file, then choose «cookies.txt file» and press «Load cookies file». It is kept on your computer only. Don't send it to anyone: it is equivalent to your login.","ما زال يعمل — أيقونته بجانب الساعة.":"Still running — its icon is next to the clock.","مباشر":"direct","متابعة":"Follow","متابعة ·":"Follow ·","متابعة البث المباشر المسجَّل لهذه القناة":"Follow this channel's recorded live streams","متابعة القنوات":"Follow channels","متابعة المقاطع القصيرة لهذه القناة":"Follow this channel's Shorts","متابعة قناة أو قائمة":"Follow a channel or list","متابعة:":"Follow:","متاح ✓":"available ✓","متاح:":"Available:","متبقٍّ":"remaining","متوقف":"Off","متوقف مؤقتاً":"Paused","متوقف مؤقتاً — من الجلسة السابقة":"Paused — from the previous session","متوقفة":"Paused","متى يُستخدم":"When to use it","مجدول":"Scheduled","مجدول — يبدأ":"Scheduled — starts","مجلد الحفظ":"Save folder","مجلد الحفظ (يُنشأ داخله مجلد باسم القناة)":"Save folder (a folder named after the channel is created inside)","مجلد الحفظ الافتراضي":"Default save folder","مجلد الحفظ:":"Save folder:","محاولات خاطئة كثيرة — انتظر 5 دقائق.":"Too many wrong attempts — wait 5 minutes.","محرك التنزيل":"Download engine","محركان ✓":"Two engines ✓","مراقبة الحافظة: عند نسخ رابط فيديو اقترح تنزيله":"Watch the clipboard: when you copy a video link, suggest downloading it","مزايا إضافية":"Extra features","مسار الملف":"File path","مسار صوتي فقط؛ يمكنك تحويله إلى MP3 أو غيره من الخيارات بالأسفل.":"An audio track only; you can convert it to MP3 or other options below.","مستقر.":"stable.","مستقرة (موصى به)":"Stable (recommended)","مسح السجل كله":"Clear the whole history","مسح المنتهي":"Clear finished","مصدر التحديثات":"Update source","معاينة":"Preview","معدل البت":"Bitrate","معرض ·":"Gallery ·","معرض · gallery-dl":"Gallery · gallery-dl","معرض صور/ملفات":"Image/file gallery","معطّل حالياً في المحرك":"currently disabled in the engine","مفعّل":"On","مفعّلة":"On","مكان ملف الترجمة.":"in place of the subtitle file.","ملاحظة":"Note","ملف":"file","ملف cookies.txt (الأضمن)":"cookies.txt file (most reliable)","ملف ·":"files ·","ملف منفصل (srt) فقط":"Separate file (srt) only","ملف واحد يحتوي الصورة والصوت معاً كما يوفّره الموقع.":"One file containing picture and sound together, as the site provides it.","ملفات إضافة المتصفح غير موجودة في هذه النسخة.":"The browser extension files are not in this version.","من":"From","من الجوال":"From phone","من المتصفح":"From browser","من المتصفح ·":"From browser ·","من المتصفح · بث ملتقط ·":"From browser · caught stream ·","من المتصفح · ملف":"From browser · file","من قائمة «تطوير» اختر «إعدادات المطوّر…» ثم «إضافة امتداد مؤقت…» واختر مجلد سفاري.":"From the «Develop» menu choose «Developer Settings…», then «Add Temporary Extension…» and choose the Safari folder.","منها نُزّل سابقاً":"of them downloaded before","ميغابايت":"MB","ميغابايت.":"MB.","نافذة اختيار المجلد مفتوحة بالفعل. ابحث عنها في شريط المهام إن كانت خلف المتصفح.":"The folder selection window is already open. Look for it in the taskbar if it's behind the browser.","نافذة الاختيار مفتوحة بالفعل.":"The selection window is already open.","نافذة البرنامج الخاصة (موصى به)":"The program's own window (recommended)","نجح بطريقة:":"Worked with:","نزّل أي فيديو أو ملف صوتي بالجودة التي تختارها، أو قوائم كاملة، أو تابع قنواتك تلقائياً.":"Download any video or audio file in the quality you choose, whole playlists, or follow your channels automatically.","نسخ":"Copy","نسخ تقرير الخطأ":"Copy error report","نسخة احتياطية":"Backup","نُزّل":"downloaded","نُزّل سابقاً — تم التخطّي":"Downloaded before — skipped","هذا الرابط معرض أو منشور فيه صور أو ملفات متعددة، وسيُنزَّل بالمحرك الثاني (":"This link is a gallery or a post with several images or files; it will be downloaded with the second engine (","هذا المحتوى غير متاح في بلدك من مصدره.":"This content is not available in your country at its source.","هذا المحتوى محمي بتقنية منع النسخ ولا يمكن تنزيله.":"This content is protected by copy-prevention technology and can't be downloaded.","هذا الملف ليس فيديو.":"This file is not a video.","هذا بث مباشر":"This is a live stream","هذا رابط فيديو واحد. ضع رابط القناة أو قائمة التشغيل.":"This is a single video link. Enter the channel or playlist link.","هذا ليس ملف كوكيز صالحاً. صدّره بصيغة Netscape (cookies.txt) من إضافة المتصفح.":"This is not a valid cookies file. Export it in Netscape format (cookies.txt) from the browser extension.","هذا ليس ملف نسخة احتياطية من MO Downloader.":"This is not an MO Downloader backup file.","هذه الجودة لم تعد متاحة. اضغط «عرض الجودات» مجدداً واختر غيرها.":"This quality is no longer available. Press «Show qualities» again and choose another.","هذه الصفحة لا تحتوي رابطاً يمكن تنزيله.":"This page has no link that can be downloaded.","هذه القناة أو القائمة متابَعة بالفعل.":"This channel or list is already followed.","وقت النهاية يجب أن يكون بعد وقت البداية.":"The end time must be after the start time.","ويُفتح.":"is created and opened.","يدعمه باسم «":"supports it as «","يستمر التسجيل حتى ينتهي البث أو تضغط «⏹ إيقاف التسجيل وحفظه» في قائمة التنزيلات، ويُحفظ ما سُجّل.":"Recording continues until the stream ends or you press «⏹ Stop recording and save» in the downloads list; what was recorded is saved.","يعرض أي محرك يدعم الرابط، والطريقة التي نجحت في قراءته، قبل أن تنزّل.":"Shows which engine supports the link, and the method that managed to read it, before you download.","يعمل":"running","يمكنك إغلاق هذه الصفحة. لتشغيلها مجدداً افتح أيقونة الأداة.":"You can close this page. To start it again, open the tool's icon.","يمكنك ضبط بروكسي من تبويب الإعدادات لتعيد الأداة المحاولة عبره تلقائياً.":"You can set a proxy in the settings tab so the tool retries through it automatically.","يوجد إصدار جديد":"A new version is available:","يوم":"day","يومي.":"nightly.","يومية — إصلاحات المواقع تصل إليها أولاً":"Nightly — site fixes reach it first","يُثبَّت التحديث الآن وسيفتح البرنامج من جديد.":"The update is being installed now; the program will open again.","يُحفظ الناتج بجانب الملف الأصلي باسم جديد، ولا يتغيّر الأصل. ويظهر التقدّم في قائمة التنزيلات بالأسفل.":"The result is saved next to the original file under a new name; the original is not changed. Progress appears in the downloads list below.","يُستخدم دائماً":"Always used","يُستخدم عند الحاجة فقط (موصى به)":"Used only when needed (recommended)","يُعرض أول 300 نتيجة — اكتب اسماً أدق.":"Showing the first 300 results — type a more exact name.","يُنشأ مجلد باسم الموقع داخل مجلد الحفظ.":"A folder named after the site is created inside the save folder.","— النهاية قبل البداية":"— the end is before the start","— صيغة الوقت غير صحيحة":"— invalid time format","— مقطع":"— clip","— نزّل دقائق محددة بدل الفيديو كاملاً":"— download specific minutes instead of the whole video","— نزّله من صفحة الإصدارات.":"— download it from the releases page.","— يُستخدم بعد إعادة تشغيل البرنامج.":"— used after restarting the program.","⏸ إيقاف مؤقت":"⏸ Pause","⏹ إيقاف التسجيل وحفظه":"⏹ Stop recording and save","⏺ تسجيل البث":"⏺ Record stream","▶ استئناف":"▶ Resume","▶ تشغيل":"▶ Play","⚡ أفضل جودة فيديو":"⚡ Best video quality","✓ أُضيف":"✓ Added","✓ استُورد":"✓ Imported","✓ الاستقبال متوقف":"✓ Receiving is off","✓ الاستقبال مفعّل":"✓ Receiving is on","✓ البروكسي يعمل (":"✓ The proxy works (","✓ النتيجة:":"✓ Result:","✓ بدأ التنزيل":"✓ Download started","✓ بدأ — تابع التقدّم في قائمة التنزيلات":"✓ Started — follow the progress in the downloads list","✓ تم إيقاف البروكسي":"✓ Proxy turned off","✓ تم الحفظ":"✓ Saved","✓ تم الحفظ — يُطبَّق عند فتح البرنامج المرة القادمة":"✓ Saved — applied the next time the program opens","✓ تم حفظ مجلد الحفظ الجديد":"✓ New save folder saved","✓ تمت متابعة «":"✓ Now following «","✓ حُفظ:":"✓ Saved:","✓ رمز جديد — امسحه من الجوال مرة أخرى":"✓ New code — scan it from the phone again","✓ ملف الكوكيز محفوظ":"✓ Cookies file saved","✓ نُسخ":"✓ Copied","✗ تعذّرت القراءة:":"✗ Couldn't read it:","🎵 أفضل صوت MP3":"🎵 Best audio MP3","📋 نسخت رابط فيديو:":"📋 You copied a video link:","🔴 بث مباشر":"🔴 Live stream"};
+const EN = LANG === "en";
+const AR_CH = "\u0600-\u06FF";
+const AR_RE = new RegExp("[" + AR_CH + "]");
+const I18N_KEYS = Object.keys(I18N).sort((a, b) => b.length - a.length);
+const reEsc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const I18N_RE = {};
+function trPass(o, short) {
+  for (const k of I18N_KEYS) {
+    if (!short && k.length < 6 && !k.includes(" ")) continue;
+    if (!o.includes(k)) continue;
+    const re = I18N_RE[k] || (I18N_RE[k] = new RegExp("(?<![" + AR_CH + "])" + reEsc(k) + "(?![" + AR_CH + "])", "g"));
+    o = o.replace(re, () => I18N[k]);
+    if (!AR_RE.test(o)) break;
+  }
+  return o;
+}
+function tr(t) {
+  if (!EN || !t || !AR_RE.test(t)) return t;
+  const n = t.replace(/\s+/g, " "), st = n.trim();
+  if (I18N[st]) return t.slice(0, t.length - t.trimStart().length) + I18N[st] + (/\s$/.test(t) ? " " : "");
+  // phrases inside a composed message; short words only when they finish the whole translation
+  // (otherwise «من» = "from" would land in the middle of an untranslated Arabic sentence)
+  const long = trPass(n, false);
+  if (!AR_RE.test(long)) return long;
+  const all = trPass(long, true);
+  return AR_RE.test(all) ? long : all;
+}
+const NO_TR = "[translate=no], .t, .ltr, #title, input, textarea";
+function trTree(root) {
+  if (!EN || !root) return;
+  if (root.nodeType === 3) {
+    if (root.parentElement && root.parentElement.closest(NO_TR)) return;
+    const v = tr(root.nodeValue); if (v !== root.nodeValue) root.nodeValue = v; return;
+  }
+  if (root.nodeType !== 1 || root.closest(NO_TR) && root.matches(NO_TR)) return;
+  for (const a of ["placeholder", "title", "aria-label"]) {
+    if (root.hasAttribute && root.hasAttribute(a) && !(a === "placeholder" && root.closest("[translate=no]"))) {
+      const v = tr(root.getAttribute(a)); if (v !== root.getAttribute(a)) root.setAttribute(a, v);
+    }
+  }
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  let n;
+  while ((n = w.nextNode())) {
+    if (n.nodeType === 1) {
+      for (const a of ["placeholder", "title", "aria-label"]) if (n.hasAttribute(a)) {
+        const v = tr(n.getAttribute(a)); if (v !== n.getAttribute(a)) n.setAttribute(a, v);
+      }
+      continue;
+    }
+    if (n.parentElement && n.parentElement.closest(NO_TR)) continue;
+    const v = tr(n.nodeValue); if (v !== n.nodeValue) n.nodeValue = v;
+  }
+}
+if (EN) {
+  document.documentElement.lang = "en"; document.documentElement.dir = "ltr";
+  trTree(document.body);
+  new MutationObserver((ms) => {
+    for (const m of ms) {
+      if (m.type === "characterData") trTree(m.target);
+      else if (m.type === "attributes") trTree(m.target);
+      else m.addedNodes.forEach(trTree);
+    }
+  }).observe(document.body, {childList: true, subtree: true, characterData: true, attributes: true,
+                              attributeFilter: ["placeholder", "title"]});
+}
 const TOKEN = "__TOKEN__";
 const $ = (id) => document.getElementById(id);
 const S = { info: null, tab: "av", sel: null, url: "", settings: {}, status: {}, hasCookie: false, doneSig: "" };
@@ -3764,8 +5026,8 @@ const fmtDur = (s) => {
   s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
   return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0");
 };
-const DF = new Intl.DateTimeFormat("ar-u-nu-latn-ca-gregory", { dateStyle: "medium", timeStyle: "short" });
-const RF = new Intl.RelativeTimeFormat("ar-u-nu-latn", { numeric: "auto" });
+const DF = new Intl.DateTimeFormat(EN ? "en-GB" : "ar-u-nu-latn-ca-gregory", { dateStyle: "medium", timeStyle: "short" });
+const RF = new Intl.RelativeTimeFormat(EN ? "en" : "ar-u-nu-latn", { numeric: "auto" });
 const fmtDate = (t) => t ? DF.format(new Date(t * 1000)) : "—";
 function fmtAgo(t) {
   if (!t) return "لم يُفحص بعد";
@@ -3856,6 +5118,19 @@ async function loadStatus() {
     $("cookies").value = s.settings.cookies || ""; cookieUI();
     if (document.activeElement !== $("proxy")) $("proxy").value = s.settings.proxy || "";
     $("proxyMode").value = s.settings.proxy_mode || "fallback";
+    $("langBtn").textContent = EN ? "العربية" : "English";
+    $("c-sub3d").classList.toggle("hidden", !s.settings.sub3d_cmd);
+    if (!S.set2Loaded) {
+      S.set2Loaded = true;
+      $("setLang").value = s.settings.lang || "ar"; $("setRate").value = s.settings.rate_limit_kb || "";
+      $("setNameTpl").value = s.settings.name_tpl || ""; $("setFolderTpl").value = s.settings.folder_tpl || "";
+      $("setNotify").checked = s.settings.notify !== false; $("setClip").checked = !!s.settings.clipboard;
+      $("setSub3d").value = s.settings.sub3d_cmd || ""; $("phOn").checked = !!s.settings.phone;
+      $("phPin").value = s.settings.phone_pin || ""; $("updUrl").value = s.settings.update_url || "";
+    }
+    $("tplEx").textContent = s.tpl_example || "";
+    phoneUI(s.phone);
+    updUI(s.update);
     const ab = $("about"); ab.textContent = "";
     ab.append("الإصدار " + s.app + " · محرك التنزيل ", el("span", {class: "ltr", text: "yt-dlp " + s.ytdlp}),
       s.frozen ? " (يُحدَّث تلقائياً يومياً)" : " (يُحدَّث عند كل تشغيل)", el("br"), "مجلد الحفظ: ",
@@ -4030,8 +5305,27 @@ function singleOpts() {
     url: S.url, subs: $("subs").checked && !$("subs").disabled, meta: $("meta").checked, outdir: $("outdir").value.trim(),
     container: $("container").value, audio_convert: $("audio_convert").value, audio_quality: $("audio_quality").value,
     title: S.info && S.info.title, clip_start: c ? c.startTxt : "", clip_end: c ? c.endTxt : "", clip_precise: $("clipPrecise").checked,
+    sub_langs: $("subLangs").value, sub_mode: $("subMode").value, sub_auto: $("subAuto").checked,
+    sub3d: $("sub3d").checked && !$("c-sub3d").classList.contains("hidden"),
+    split_chapters: $("splitCh").checked, after: afterOpt(), start_at: startAt(),
   };
 }
+function afterOpt() {
+  const v = $("after").value; if (!v) return null;
+  const [tool, arg] = v.split(":");
+  if (tool === "compress") return {tool, target_mb: +$("afterMb").value};
+  if (tool === "preset") return {tool, preset: arg};
+  if (tool === "resize") return {tool, height: +arg};
+  if (tool === "audio") return {tool, format: arg};
+  return null;
+}
+function startAt() {
+  const v = $("startAt").value; if (!v) return null;
+  const t = new Date(v).getTime() / 1000;
+  return t > Date.now() / 1000 + 2 ? t : null;
+}
+$("subs").onchange = () => $("subopts").classList.toggle("hidden", !$("subs").checked);
+$("after").onchange = () => $("o-afterMb").classList.toggle("hidden", $("after").value !== "compress");
 async function download() {
   const f = S.sel; if (!f) return;
   try {
@@ -4048,6 +5342,153 @@ async function downloadPreset(p) {
     poll();
   } catch (e) { showMsg("msg", e.message); window.scrollTo({top: 0, behavior: "smooth"}); }
 }
+let toastTimer = null;
+function toast(msg, ok) {
+  let t = $("toast");
+  if (!t) { t = el("div", {id: "toast", role: "status"}); document.body.append(t); t.onclick = () => t.classList.remove("show"); }
+  t.textContent = msg; t.className = "show" + (ok ? " ok" : "");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 6000);
+}
+// a button whose request failed used to do nothing visible: show why instead
+window.addEventListener("unhandledrejection", (e) => {
+  const m = (e.reason && e.reason.message) || String(e.reason || "");
+  if (m) toast(m === "Failed to fetch" ? "البرنامج لا يستجيب — هل أُغلق؟" : m);
+});
+const playBtn = (file) => el("button", {class: "small", text: "▶ تشغيل", title: "فتح الملف في مشغّل الجهاز",
+  onclick: () => api("/api/open", {path: file, play: true})});
+const MEDIA_EXT = /\.(mp4|m4v|webm|mkv|mov|mp3|m4a|aac|ogg|opus|flac|wav)$/i;
+const isMedia = (f) => MEDIA_EXT.test(f || "");
+function previewBtn(file, title) {
+  return el("button", {class: "small ghost", text: "معاينة", onclick: () => {
+    $("pvt").textContent = title || file.split(/[\\/]/).pop();
+    $("pvv").src = "/api/media?t=" + encodeURIComponent(TOKEN) + "&path=" + encodeURIComponent(file);
+    $("pv").classList.remove("hidden"); $("pvv").play().catch(() => {});
+  }});
+}
+function closePreview() { $("pvv").pause(); $("pvv").removeAttribute("src"); $("pvv").load(); $("pv").classList.add("hidden"); }
+$("pvx").onclick = closePreview;
+$("pv").onclick = (e) => { if (e.target === $("pv")) closePreview(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("pv").classList.contains("hidden")) closePreview(); });
+$("pvv").onerror = () => { if ($("pvv").getAttribute("src")) toast("لا يمكن معاينة هذا الملف داخل النافذة — استخدم «تشغيل»."); };
+
+// ---------- tools
+function toTools(file) { showPanel("tools"); $("tin").value = file; probeTool(); window.scrollTo({top: 0}); }
+function toolUI() {
+  const op = $("top").value;
+  $("t-mb").classList.toggle("hidden", op !== "compress"); $("t-h").classList.toggle("hidden", op !== "resize");
+  $("t-p").classList.toggle("hidden", op !== "preset"); $("t-a").classList.toggle("hidden", op !== "audio");
+}
+$("top").onchange = toolUI;
+const fmtDur2 = (s) => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
+async function probeTool() {
+  const p = $("tin").value.trim(); $("tinfo").textContent = ""; if (!p) return;
+  try {
+    const r = await api("/api/probe", {path: p});
+    $("tinfo").textContent = (r.video ? "فيديو " + (r.height ? r.height + "p" : "") : "صوت") + " · المدة " + fmtDur2(r.duration) +
+      (r.chapters.length ? " · " + r.chapters.length + " فصول" : " · بلا فصول");
+  } catch (e) { $("tinfo").textContent = e.message; }
+}
+$("tin").addEventListener("change", probeTool);
+$("tpick").onclick = async () => {
+  try { const r = await api("/api/pick_file", {initial: $("tin").value.trim() ? "" : S.settings.outdir});
+        if (r.path) { $("tin").value = r.path; probeTool(); } }
+  catch (e) { $("tmsg").textContent = e.message; }
+};
+$("tgo").onclick = async () => {
+  const op = $("top").value, body = {tool: op, input: $("tin").value.trim()};
+  if (op === "compress") body.target_mb = +$("tmb").value;
+  if (op === "resize") body.height = +$("theight").value;
+  if (op === "preset") body.preset = $("tpreset").value;
+  if (op === "audio") body.format = $("tfmt").value;
+  try { await api("/api/tool", body); $("tmsg").textContent = "✓ بدأ — تابع التقدّم في قائمة التنزيلات"; poll();
+        setTimeout(() => $("tmsg").textContent = "", 4000); }
+  catch (e) { $("tmsg").textContent = e.message; }
+};
+
+// ---------- clipboard suggestion
+async function checkClip() {
+  try {
+    const r = await api("/api/clip");
+    const c = r.clip, bar = $("clipbar");
+    if (!c || c.id === S.clipHidden) { bar.classList.add("hidden"); return; }
+    S.clip = c; $("clipurl").textContent = c.url; bar.classList.remove("hidden");
+  } catch (e) {}
+}
+setInterval(checkClip, 3000);
+const clipDone = () => { S.clipHidden = S.clip && S.clip.id; $("clipbar").classList.add("hidden"); api("/api/clip_dismiss", {}).catch(() => {}); };
+$("clipGo").onclick = async () => {
+  if (!S.clip) return;
+  await api("/api/download", {url: S.clip.url, mode: "preset", preset: "best", label: "أفضل جودة", outdir: S.settings.outdir});
+  clipDone(); poll(); toast("✓ بدأ التنزيل", true);
+};
+$("clipShow").onclick = () => { if (!S.clip) return; showPanel("dl"); $("url").value = S.clip.url; clipDone(); analyze(); };
+$("clipNo").onclick = clipDone;
+
+// ---------- extra settings
+$("set2Save").onclick = async () => {
+  const langChanged = $("setLang").value !== (S.settings.lang || "ar");
+  try {
+    await api("/api/settings", {lang: $("setLang").value, rate_limit_kb: +$("setRate").value || 0,
+      name_tpl: $("setNameTpl").value.trim(), folder_tpl: $("setFolderTpl").value.trim(),
+      notify: $("setNotify").checked, clipboard: $("setClip").checked, sub3d_cmd: $("setSub3d").value.trim()});
+    if (langChanged) { location.reload(); return; }
+    $("set2msg").textContent = "✓ تم الحفظ"; setTimeout(() => $("set2msg").textContent = "", 2500); loadStatus();
+  } catch (e) { $("set2msg").textContent = e.message; }
+};
+$("langBtn").onclick = async () => { await api("/api/settings", {lang: EN ? "ar" : "en"}); location.reload(); };
+
+// ---------- phone
+async function phoneUI(ph) {
+  const on = ph && ph.on;
+  $("phBox").classList.toggle("hidden", !on);
+  if (on && ph.url !== S.phUrl) {
+    S.phUrl = ph.url;
+    try { const r = await api("/api/phone", {}); $("phUrl").textContent = r.url; $("phQr").innerHTML = r.svg || ""; } catch (e) {}
+  }
+}
+$("phSave").onclick = async () => {
+  try { await api("/api/settings", {phone: $("phOn").checked, phone_pin: $("phPin").value.trim()});
+        $("phMsg").textContent = $("phOn").checked ? "✓ الاستقبال مفعّل" : "✓ الاستقبال متوقف"; S.phUrl = null; loadStatus(); }
+  catch (e) { $("phMsg").textContent = e.message; }
+};
+$("phNew").onclick = async () => { await api("/api/settings", {phone_new_key: true}); S.phUrl = null; loadStatus();
+  $("phMsg").textContent = "✓ رمز جديد — امسحه من الجوال مرة أخرى"; };
+
+// ---------- backup
+const bkParts = () => [["bkSettings", "settings"], ["bkSubs", "subs"], ["bkHist", "history"]].filter(([i]) => $(i).checked).map(([, p]) => p);
+$("expBtn").onclick = async () => {
+  try { const r = await api("/api/export", {}); $("bkMsg").textContent = "✓ حُفظ: " + r.file.split(/[\\/]/).pop();
+        api("/api/open", {path: r.file, select: true}).catch(() => {}); }
+  catch (e) { $("bkMsg").textContent = e.message; }
+};
+$("impBtn").onclick = () => $("impFile").click();
+$("impFile").onchange = async () => {
+  const f = $("impFile").files[0]; if (!f) return;
+  try {
+    const data = JSON.parse(await f.text());
+    const r = await api("/api/import", {data, parts: bkParts()});
+    $("bkMsg").textContent = "✓ استُورد" + (r.history != null ? " · السجل: " + r.history : "") + (r.subs != null ? " · القنوات: " + r.subs : "") +
+      (r.settings ? " · الإعدادات" : "");
+    S.set2Loaded = false; loadStatus();
+  } catch (e) { $("bkMsg").textContent = e instanceof SyntaxError ? "الملف ليس نسخة احتياطية صالحة." : e.message; }
+  $("impFile").value = "";
+};
+
+// ---------- app update
+function updUI(u) {
+  u = u || {};
+  $("updMsg").textContent = u.msg || ("الإصدار الحالي " + (S.status ? S.status.app : ""));
+  $("updInstall").classList.toggle("hidden", u.state !== "ready");
+  $("updCheck").disabled = ["checking", "downloading"].includes(u.state);
+  if (["checking", "downloading"].includes(u.state)) setTimeout(loadStatus, 1500);
+}
+$("updCheck").onclick = async () => { await api("/api/update_check", {}); setTimeout(loadStatus, 600); };
+$("updInstall").onclick = async () => { try { const r = await api("/api/update_install", {}); toast(r.msg, true); } catch (e) { toast(e.message); } };
+$("updUrlSave").onclick = async () => { try { await api("/api/settings", {update_url: $("updUrl").value.trim()}); toast("✓ تم الحفظ", true); }
+  catch (e) { toast(e.message); } };
+toolUI();
+
 function flash(b) { const t = b.textContent; b.textContent = "✓ أُضيف"; setTimeout(() => b.textContent = t, 1500); }
 function renderPlaylist(info) {
   $("plresult").classList.remove("hidden");
@@ -4238,7 +5679,10 @@ async function loadHistory(more) {
           h.site ? el("span", {text: h.site}) : null,
           h.source ? el("span", {class: "badge", text: h.source}) : null),
         el("div", {class: "acts"},
-          h.file ? el("button", {class: "small", text: "إظهار الملف", onclick: () => api("/api/open", {path: h.file, select: true})}) : null,
+          h.file ? playBtn(h.file) : null,
+          h.file && isMedia(h.file) ? previewBtn(h.file, h.title) : null,
+          h.file && isMedia(h.file) ? el("button", {class: "small ghost", text: "تحويل…", onclick: () => toTools(h.file)}) : null,
+          h.file ? el("button", {class: "small ghost", text: "إظهار الملف", onclick: () => api("/api/open", {path: h.file, select: true})}) : null,
           h.url ? el("button", {class: "small ghost", text: "فتح الرابط", onclick: () => api("/api/open_url", {url: h.url})}) : null,
           h.url ? el("button", {class: "small ghost", text: "تنزيل مجدداً", onclick: () => {
             $("url").value = h.url; showPanel("dl"); analyze(); }}) : null,
@@ -4309,6 +5753,8 @@ function renderJobs(jobs) {
     if (!["done", "error", "cancelled"].includes(j.status))
       acts.append(el("button", {class: "small", text: "إلغاء", onclick: () => api("/api/cancel", {id: j.id}).then(poll)}));
     const folderOnly = j.many || j.gallery;
+    if (j.status === "done" && j.file && !folderOnly) acts.append(playBtn(j.file));
+    if (j.status === "done" && j.file && !folderOnly && isMedia(j.file)) acts.append(previewBtn(j.file, j.title));
     if (j.status === "done" && (j.file || j.outdir))
       acts.append(el("button", {class: "small", text: j.file && !folderOnly ? "إظهار الملف" : "فتح المجلد",
         onclick: () => api("/api/open", {path: folderOnly ? j.outdir : (j.file || j.outdir), select: !!j.file && !folderOnly})}));

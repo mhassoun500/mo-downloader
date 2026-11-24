@@ -146,6 +146,26 @@ async def main_async(app, home):
         rt.check("download button appears over a video", on_video, "")
         rt.check("…and over an image scrolled into view later", await hp.evaluate(attached), str(shot))
 
+        # --- the interface in English: no Arabic left on any tab (video titles and paths excepted)
+        app.api("/api/settings", {"lang": "en"})
+        ep = await ctx.new_page()
+        await ep.set_viewport_size({"width": 1200, "height": 900})
+        await ep.goto(app.base + "/")
+        await ep.wait_for_timeout(1500)
+        left = []
+        for panel in ("dl", "batch", "subs", "hist", "tools", "sites", "settings"):
+            await ep.click(f'nav button[data-p="{panel}"]')
+            await ep.wait_for_timeout(600)
+            left += await ep.evaluate("""() => { const out = []; const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+              let n; while ((n = w.nextNode())) { const e = n.parentElement;
+                if (!e || e.closest('.hidden, script, style, [translate=no], .t, .ltr, option')) continue;
+                if (!e.offsetParent && getComputedStyle(e).position !== 'fixed') continue;
+                if (/[\u0600-\u06FF]/.test(n.nodeValue)) out.push(n.nodeValue.trim()); }
+              return out; }""")
+        await ep.close()
+        app.api("/api/settings", {"lang": "ar"})
+        rt.check("interface in English: no Arabic left on any tab", not left, str(sorted(set(left)))[:300])
+
         # --- caught streams: the player's own header, qualities, embedded players, fallback for the page
         pg = await ctx.new_page()
         await pg.goto(SITE + "/pages/player.html")

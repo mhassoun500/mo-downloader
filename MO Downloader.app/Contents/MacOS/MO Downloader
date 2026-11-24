@@ -27,9 +27,9 @@ if ! "$PY" -c "import yt_dlp, gallery_dl, curl_cffi, imageio_ffmpeg, deno, webvi
 case " $* " in *" --background "*) ;; *) osascript -e 'display notification "Installing the download engine… (first launch only, about a minute)" with title "MO Downloader"' >/dev/null 2>&1;; esac
 {
   echo "=== $(date) — $PY (first-run install)"
-  "$PY" -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview 2>/dev/null \
-   || "$PY" -m pip install -U --quiet --user "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview 2>/dev/null \
-   || "$PY" -m pip install -U --quiet --break-system-packages "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview
+  "$PY" -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl segno imageio-ffmpeg deno pywebview 2>/dev/null \
+   || "$PY" -m pip install -U --quiet --user "yt-dlp[default,curl-cffi]" gallery-dl segno imageio-ffmpeg deno pywebview 2>/dev/null \
+   || "$PY" -m pip install -U --quiet --break-system-packages "yt-dlp[default,curl-cffi]" gallery-dl segno imageio-ffmpeg deno pywebview
 } >>"$LOG" 2>&1
 fi
 

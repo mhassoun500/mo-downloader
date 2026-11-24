@@ -188,6 +188,19 @@ DEFAULT_SETTINGS = {
     "ui": "window",             # window = the app's own window | browser = the default web browser
     "engine_channel": "stable", # stable | nightly (site fixes reach nightly builds first)
     "engine_checked": 0,
+    # 2.7
+    "lang": "ar",               # ar | en (the interface language)
+    "rate_limit_kb": 0,         # download speed limit in KB/s, 0 = none
+    "name_tpl": "",             # file name template, e.g. "{date} - {title}"; empty = "{title} [{id}] {quality}"
+    "folder_tpl": "",           # sub-folder template, e.g. "{site}/{uploader}"; empty = straight into the folder
+    "notify": True,             # a notification on the computer when a download finishes or fails
+    "clipboard": False,         # suggest downloading a video link copied to the clipboard
+    "phone": False,             # accept links sent from a phone on the same network
+    "phone_pin": "",
+    "phone_key": "",
+    "sub3d_cmd": "",            # optional command for the 3D subtitle tool: {file} = the .srt file
+    "update_url": "https://api.github.com/repos/mhassoun500/mo-downloader/releases/latest",
+    "update_checked": 0,
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
 SETTINGS_LOCK = threading.Lock()
@@ -351,6 +364,37 @@ if len(sys.argv) > 2 and sys.argv[1] == "--engine-check":
         "ffmpeg": bool(FFMPEG), "js": sorted(JS_RUNTIMES)}), encoding="utf-8")
     sys.exit(0)
 TOKEN = secrets.token_urlsafe(16)
+NO_WINDOW = 0x08000000 if SYSTEM == "Windows" else 0  # child processes without a console window
+
+# English for the interface and messages (Arabic text -> English), filled in by src/make.py from src/i18n_en.json
+I18N_EN = json.loads(r"""__I18N__""")
+_I18N_KEYS = sorted(I18N_EN, key=len, reverse=True)
+_AR = "\u0600-\u06FF"
+
+
+def T(text):
+    """Translate a message for the interface language (English when chosen; Arabic is the source language).
+    Whole messages first; otherwise each known Arabic phrase inside a composed message."""
+    if SETTINGS.get("lang") != "en" or not text or not re.search(f"[{_AR}]", str(text)):
+        return text
+    norm = re.sub(r"\s+", " ", str(text)).strip()
+    if norm in I18N_EN:
+        return I18N_EN[norm]
+
+    def one_pass(o, short):
+        for k in _I18N_KEYS:
+            if (short or len(k) >= 6 or " " in k) and k in o:
+                o = re.sub(f"(?<![{_AR}]){re.escape(k)}(?![{_AR}])", lambda m: I18N_EN[k], o)
+        return o
+    long = one_pass(norm, False)
+    if not re.search(f"[{_AR}]", long):
+        return long
+    full = one_pass(long, True)
+    return long if re.search(f"[{_AR}]", full) else full.replace(stripped, I18N_EN[stripped])
+    for k in _I18N_KEYS:
+        if k in text:
+            text = re.sub(f"(?<![{_AR}]){re.escape(k)}(?![{_AR}])", lambda m: I18N_EN[k], text)
+    return text
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -1367,7 +1411,10 @@ def build_download_opts(req, job, logger):
     opts["paths"] = {"home": str(outdir)}
     opts["continuedl"] = True
     opts["overwrites"] = False
-    if accel_on(opts.get("proxy"), req) and not req.get("_impersonate"):  # aria2 can't present itself as a browser
+    limit = int(SETTINGS.get("rate_limit_kb") or 0)
+    if limit > 0:
+        opts["ratelimit"] = limit * 1024  # (aria2's many connections would go around the limit: not used then)
+    elif accel_on(opts.get("proxy"), req) and not req.get("_impersonate"):  # aria2 can't present itself as a browser
         opts["external_downloader"] = {"http": ARIA2C, "https": ARIA2C}
         opts["concurrent_fragment_downloads"] = max(4, min(16, int(SETTINGS.get("accel_conns") or 8)))
 
@@ -1415,6 +1462,8 @@ def build_download_opts(req, job, logger):
     # --- file names
     quality_part = "" if kind == "audio" else "%(height& {}p|)s"
     name = f"%(title).150B [%(id)s]{quality_part}{clip_suffix}.%(ext)s"
+    if SETTINGS.get("name_tpl"):
+        name = tpl_to_ytdlp(SETTINGS["name_tpl"], quality_part) + f"{clip_suffix}.%(ext)s"
     if req.get("sub_id"):
         folder = safe_name(req.get("folder") or "Channel")
         opts["outtmpl"] = {"default": f"{folder}/%(upload_date>%Y-%m-%d&{{}} - |)s{name}"}
@@ -1428,7 +1477,12 @@ def build_download_opts(req, job, logger):
         opts["outtmpl"] = {"default": f"{safe_name(req['name'], 120)} [{tag}]{quality_part}{clip_suffix}.%(ext)s"}
     else:
         # never start the template with a field that can be empty followed by "/" — that makes an absolute path
-        opts["outtmpl"] = {"default": name}
+        folder = tpl_to_ytdlp(SETTINGS["folder_tpl"], quality_part, folder=True) if SETTINGS.get("folder_tpl") else ""
+        opts["outtmpl"] = {"default": f"{folder}/{name}" if folder else name}
+    if req.get("split_chapters") and FFMPEG:
+        # one file per chapter (the whole video is kept too), in a folder next to it
+        pps.append({"key": "FFmpegSplitChapters", "force_keyframes": True})  # cut exactly at the chapter times
+        opts["outtmpl"]["chapter"] = "%(title).120B - chapters/%(section_number)03d - %(section_title).100B.%(ext)s"
 
     if req.get("live") in ("now", "start"):
         opts["live_from_start"] = req["live"] == "start"
@@ -1465,14 +1519,16 @@ def build_download_opts(req, job, logger):
             pps.append({"key": "FFmpegVideoRemuxer", "preferedformat": container})
             final_ext = container
         if want_subs:
+            mode = req.get("sub_mode") or "both"  # embed | file | both
             opts.update({
-                "writesubtitles": True, "writeautomaticsub": False,
-                "subtitleslangs": req.get("sub_langs") or ["ar", "ar-.*", "en", "en-.*"],
+                "writesubtitles": True, "writeautomaticsub": bool(req.get("sub_auto")),
+                "subtitleslangs": sub_langs(req.get("sub_langs")),
                 "subtitlesformat": "srt/vtt/best",
             })
             pps.append({"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"})
-            if final_ext in ("mp4", "mkv"):
-                pps.append({"key": "FFmpegEmbedSubtitle", "already_have_subtitle": True})
+            if final_ext in ("mp4", "mkv") and mode in ("embed", "both"):
+                # already_have_subtitle=True keeps the .srt files next to the video ("both")
+                pps.append({"key": "FFmpegEmbedSubtitle", "already_have_subtitle": mode == "both"})
 
     if want_meta:
         pps.append({"key": "FFmpegMetadata", "add_metadata": True, "add_chapters": True})
@@ -1699,6 +1755,9 @@ def run_job(job_id):
         flags, crash, code = {}, None, 0
         job["_thread"] = threading.get_ident()
         TMP_COOKIE_JOBS[job["_thread"]] = job
+        if req.get("tool"):
+            run_tool_job(job, req)
+            return
         attempts = job.setdefault("attempts", [])
         alts = [a for a in (req.get("alt_streams") or []) if a.get("url") and a["url"] != req["url"]][:3]
         if req.get("live"):
@@ -1786,6 +1845,8 @@ def run_job(job_id):
                 job.update(status="done", stage="أُوقف التسجيل وحُفظ ✓", percent=100, speed=None, eta=None)
             else:
                 job.update(status="done", stage="اكتمل ✓", percent=100, speed=None, eta=None)
+        if job["status"] == "done" and job.get("file") and not job.get("many"):
+            after_download(job, req)
     except Cancelled:
         with JOBS_LOCK:
             if job.get("pause"):
@@ -1806,8 +1867,685 @@ def run_job(job_id):
         drop_tmp_files(job)
         if req.get("sub_id") and job["status"] != PAUSED:
             sub_finished(req["sub_id"], job)
+        job_notify(job)
         with QUEUE:
             QUEUE.notify_all()
+
+
+# ================================================================ 2.7: tools, subtitles, notifications, …
+def sub_langs(v):
+    """'ar, en' or a list -> yt-dlp languages (each with its regional variants: en -> en, en-.*)."""
+    items = v if isinstance(v, list) else re.split(r"[\s,،]+", str(v or ""))
+    out = []
+    for x in (i.strip() for i in items):
+        if not x:
+            continue
+        if x in ("all", ".*"):
+            return ["all"]
+        out += [x] if ("*" in x or "-" in x) else [x, f"{x}-.*"]
+    return out or ["ar", "ar-.*", "en", "en-.*"]
+
+
+TPL_FIELDS = {
+    "title": "%(title).150B", "id": "%(id)s", "uploader": "%(uploader,channel,uploader_id|unknown)s",
+    "channel": "%(channel,uploader,uploader_id|unknown)s", "site": "%(extractor_key|site)s",
+    "date": "%(upload_date>%Y-%m-%d|no-date)s", "year": "%(upload_date>%Y|no-date)s",
+    "month": "%(upload_date>%Y-%m|no-date)s", "playlist": "%(playlist_title,playlist_id|no-playlist)s",
+    "index": "%(playlist_index|0)03d", "resolution": "%(height|0)sp", "ext": "%(ext)s",
+}
+
+
+def tpl_to_ytdlp(tpl, quality_part="", folder=False):
+    """User template ({title}, {uploader}, {site}, {date}, …) -> yt-dlp output template."""
+    tpl = str(tpl or "").strip().replace("\\", "/").strip("/")
+    tpl = tpl.replace("%", "%%")
+
+    def field(m):
+        k = m.group(1).lower()
+        if k == "quality":
+            return quality_part.strip() if not folder else "%(height|0)sp"
+        return TPL_FIELDS.get(k, m.group(0))
+    out = re.sub(r"\{(\w+)\}", field, tpl)
+    out = "/".join(x.strip() for x in out.split("/") if x.strip() and x.strip() not in (".", ".."))
+    return out
+
+
+def tpl_check(tpl, folder=False):
+    t = str(tpl or "").strip()
+    if not t:
+        return ""
+    bad = [k for k in re.findall(r"\{(\w+)\}", t) if k.lower() not in TPL_FIELDS and k.lower() != "quality"]
+    if bad:
+        raise ValueError("رموز غير معروفة في القالب: " + "، ".join("{" + b + "}" for b in bad))
+    if not folder and not re.search(r"\{(title|id)\}", t, re.I):
+        raise ValueError("قالب اسم الملف يجب أن يحتوي {title} أو {id} حتى لا تتشابه أسماء الملفات.")
+    if re.search(r'[<>:"|?*]', re.sub(r"\{\w+\}", "", t)):
+        raise ValueError('القالب يحتوي رموزاً غير مسموحة في أسماء الملفات: < > : " | ? *')
+    return t
+
+
+def tpl_example(name_tpl, folder_tpl):
+    ex = {"title": "عنوان الفيديو", "id": "dQw4w9WgXcQ", "uploader": "اسم القناة", "channel": "اسم القناة",
+          "site": "Youtube", "date": "2026-11-24", "year": "2026", "month": "2026-11", "playlist": "قائمة التشغيل",
+          "index": "007", "resolution": "1080p", "quality": "1080p", "ext": "mp4"}
+
+    ex = {k: T(v) for k, v in ex.items()}
+
+    def fill(t):
+        return re.sub(r"\{(\w+)\}", lambda m: ex.get(m.group(1).lower(), m.group(0)), t)
+    name = fill(name_tpl) if name_tpl else T("عنوان الفيديو") + " [dQw4w9WgXcQ] 1080p"
+    return (fill(folder_tpl).strip("/") + "/" if folder_tpl else "") + name + ".mp4"
+
+
+# ---------------------------------------------------------------- tools: change files that are already on disk
+TOOL_PRESETS = {  # ready-made targets
+    "mobile": {"label": "للجوال (720p)", "height": 720, "crf": 26, "abr": "128k"},
+    "tv": {"label": "للتلفاز (1080p)", "height": 1080, "crf": 21, "abr": "192k"},
+}
+AUDIO_CODECS = {"mp3": ["-c:a", "libmp3lame", "-q:a", "2"], "m4a": ["-c:a", "aac", "-b:a", "192k"],
+                "opus": ["-c:a", "libopus", "-b:a", "128k"], "flac": ["-c:a", "flac"], "wav": ["-c:a", "pcm_s16le"]}
+
+
+def probe_media(path):
+    """Duration, video height and chapters of a file (from ffmpeg's own report: no ffprobe in the bundle)."""
+    import subprocess
+    r = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    t = r.stderr
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", t)
+    dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+    hm = re.search(r"Stream #\S+.*Video:.*?(\d{2,5})x(\d{2,5})", t)
+    chapters = []
+    for cm in re.finditer(r"Chapter #\S+ start ([\d.]+), end ([\d.]+)\s*\n(?:\s*Metadata:\s*\n\s*title\s*:\s*(.*)\n)?", t):
+        chapters.append({"start": float(cm.group(1)), "end": float(cm.group(2)),
+                         "title": (cm.group(3) or "").strip() or f"Chapter {len(chapters) + 1}"})
+    return {"duration": dur, "height": int(hm.group(2)) if hm else 0, "video": bool(hm), "chapters": chapters}
+
+
+def _free_name(p):
+    p = Path(p)
+    n = 2
+    while p.exists():
+        p = p.with_name(f"{re.sub(r' \(\d+\)$', '', p.stem)} ({n}){p.suffix}")
+        n += 1
+    return p
+
+
+def tool_plan(req):
+    """What a tool job will do: (description, list of (ffmpeg args, output file), duration)."""
+    src = Path(str(req.get("input") or ""))
+    if not src.is_file():
+        raise ValueError("الملف غير موجود — اختر ملفاً من جهازك أو من السجل.")
+    if not FFMPEG:
+        raise ValueError("الأدوات تحتاج ffmpeg.")
+    info = probe_media(src)
+    op = req.get("tool")
+    stem, d = src.stem, src.parent
+    if op == "compress":
+        mb = float(req.get("target_mb") or 0)
+        if mb <= 0 or not info["duration"]:
+            raise ValueError("اكتب الحجم المطلوب بالميغابايت (والملف يجب أن يكون فيديو أو صوتاً له مدة).")
+        total_kbps = mb * 8192 * 0.95 / info["duration"]
+        a_kbps = 96 if total_kbps < 600 else 128
+        v_kbps = int(total_kbps - a_kbps)
+        if info["video"] and v_kbps < 80:
+            raise ValueError(f"الحجم صغير جداً لمدة هذا الفيديو — أقل حجم معقول تقريباً {int((80 + a_kbps) * info['duration'] / 8192 / 0.95) + 1} ميغابايت.")
+        out = _free_name(d / f"{stem} ({int(mb) if mb == int(mb) else mb}MB).mp4")
+        args = (["-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.3)}k",
+                 "-bufsize", f"{v_kbps * 2}k"] if info["video"] else ["-vn"]) + ["-c:a", "aac", "-b:a", f"{a_kbps}k"]
+        if not info["video"]:
+            out = out.with_suffix(".m4a")
+        return f"ضغط إلى {mb:g} ميغابايت", [(args + ["-movflags", "+faststart"], out)], info["duration"]
+    if op in ("resize", "preset"):
+        if not info["video"]:
+            raise ValueError("هذا الملف ليس فيديو.")
+        pr = TOOL_PRESETS.get(req.get("preset")) if op == "preset" else None
+        h = int(pr["height"] if pr else req.get("height") or 0)
+        if h < 144:
+            raise ValueError("اختر الدقة.")
+        crf, abr = (pr["crf"], pr["abr"]) if pr else (23, "160k")
+        label = pr["label"] if pr else f"{h}p"
+        out = _free_name(d / f"{stem} ({label}).mp4")
+        args = ["-vf", f"scale=-2:'min({h},ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+                "-profile:v", "high", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", abr, "-movflags", "+faststart"]
+        return ("تحويل " + label), [(args, out)], info["duration"]
+    if op == "audio":
+        fmt = req.get("format") if req.get("format") in AUDIO_CODECS else "mp3"
+        out = _free_name(d / f"{stem}.{fmt}")
+        return f"استخراج الصوت ({fmt.upper()})", [(["-vn", *AUDIO_CODECS[fmt]], out)], info["duration"]
+    if op == "chapters":
+        ch = info["chapters"]
+        if len(ch) < 2:
+            raise ValueError("لا توجد فصول في هذا الملف.")
+        folder = d / f"{stem} - chapters"
+        steps = []
+        # cut exactly at the chapter times: a plain copy could only cut at the video's key frames (seconds off);
+        # audio-only files are copied as they are (audio frames are tiny, so the cut is exact anyway)
+        enc = (["-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"] if info["video"]
+               else ["-map", "0:a", "-c", "copy"])
+        ext = ".mp4" if info["video"] else src.suffix
+        for i, c in enumerate(ch, 1):
+            out = folder / f"{i:03d} - {safe_name(c['title'], 100)}{ext}"
+            steps.append((["-ss", f"{c['start']:.3f}", "-t", f"{c['end'] - c['start']:.3f}", *enc], out))
+        return f"تقسيم إلى {len(ch)} فصول", steps, info["duration"]
+    raise ValueError("أداة غير معروفة.")
+
+
+def run_tool_job(job, req):
+    import subprocess
+    desc, steps, dur = tool_plan(req)
+    src = Path(req["input"])
+    with JOBS_LOCK:
+        job.update(status="processing", stage=desc + "…", percent=0, title=src.name, outdir=str(src.parent))
+    done_parts, total = 0, max(len(steps), 1)
+    for args, out in steps:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.stem + ".part" + out.suffix)
+        seek = args[:4] if args[:1] == ["-ss"] else []
+        rest = args[4:] if seek else args
+        cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *seek, "-i", str(src), *rest, str(tmp)]
+        piece = float(args[3]) if seek else dur
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+        job["_proc"] = proc
+        err_tail = []
+        threading.Thread(target=lambda: err_tail.extend(proc.stderr.read().splitlines()[-15:]), daemon=True).start()
+        for line in proc.stdout:
+            if job.get("cancel"):
+                proc.kill()
+                proc.wait()
+                tmp.unlink(missing_ok=True)
+                raise Cancelled()
+            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                try:
+                    t = int(line.split("=", 1)[1]) / 1e6
+                except ValueError:
+                    continue
+                frac = min(1.0, t / piece) if piece else 0
+                with JOBS_LOCK:
+                    job["percent"] = (done_parts + frac) / total * 100
+        code = proc.wait()
+        if code != 0 or not tmp.exists():
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError("فشل ffmpeg: " + " ".join(err_tail[-3:]))
+        tmp.replace(out)
+        done_parts += 1
+        history_add({"key": None, "title": out.stem, "file": str(out), "quality": desc,
+                     "size": out.stat().st_size, "date": time.time(), "source": "أدوات", "url": None})
+    with JOBS_LOCK:
+        first = steps[0][1]
+        job.update(status="done", stage=desc + " ✓", percent=100, file=str(first) if len(steps) == 1 else None,
+                   outdir=str(first.parent), done_count=len(steps), many=len(steps) > 1)
+
+
+def tool_job(req, label=None, source_label="أدوات"):
+    desc, steps, _ = tool_plan(req)  # checks the request now, so the page shows the error at once
+    r = {**req, "url": str(req["input"]), "title": Path(req["input"]).name}
+    return new_job(r, label=label or desc, source="tool", source_label=source_label)
+
+
+def after_download(job, req):
+    """What the user asked to happen once a single download is finished: a conversion, 3D subtitles."""
+    f = job.get("file")
+    if not f or not os.path.exists(f):
+        return
+    after = req.get("after") or {}
+    if after.get("tool"):
+        try:
+            tool_job({**after, "input": f}, source_label="بعد التنزيل")
+        except Exception as e:  # noqa: BLE001
+            log(f"[after] {e}")
+    if req.get("sub3d") and SETTINGS.get("sub3d_cmd"):
+        run_sub3d(f)
+
+
+def run_sub3d(video):
+    """The user's own 3D subtitle tool, run on each .srt saved next to the video."""
+    import shlex
+    import subprocess
+    v = Path(video)
+    for srt in sorted(v.parent.glob(glob_escape(v.stem) + "*.srt")):
+        cmd = SETTINGS["sub3d_cmd"].replace("{file}", f'"{srt}"')
+        try:
+            r = subprocess.run(cmd if SYSTEM == "Windows" else shlex.split(cmd), capture_output=True, text=True,
+                               timeout=600, creationflags=NO_WINDOW, cwd=str(v.parent))
+            log(f"[3d] {srt.name}: exit {r.returncode} {(r.stderr or '')[-200:]}")
+        except Exception as e:  # noqa: BLE001
+            log(f"[3d] {srt.name}: {e}")
+
+
+def glob_escape(s):
+    return re.sub(r"([\[\]*?])", r"[\1]", s)
+
+
+# ---------------------------------------------------------------- notifications on the computer
+def notify(title, body):
+    import subprocess
+    log(f"[notify] {title} — {body}")
+    if not SETTINGS.get("notify", True) or SELFTEST:
+        return
+    try:
+        if SYSTEM == "Windows":
+            tray = UI.get("tray")
+            if tray is not None:
+                tray.notify(body[:250], title[:60])
+        elif SYSTEM == "Darwin":
+            esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
+            subprocess.Popen(["osascript", "-e", f'display notification "{esc(body[:250])}" with title "{esc(title[:60])}"'])
+        elif shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "-a", APP_NAME, title, body])
+    except Exception as e:  # noqa: BLE001
+        log(f"[notify] not shown: {e}")
+
+
+def job_notify(job):
+    st = job.get("status")
+    if st not in ("done", "error") or job.get("_notified"):
+        return
+    job["_notified"] = True
+    if st == "done" and job.get("sub_id") and not job.get("done_count"):
+        return  # a channel check with nothing new
+    name = job.get("title") or job.get("url") or ""
+    if st == "error":
+        notify(T("تعذّر التنزيل"), f"{name}\n{T((job.get('error') or '').splitlines()[0] if job.get('error') else '')}")
+    elif job.get("many") and job.get("done_count"):
+        notify(T("اكتمل التنزيل ✓"), f"{name} — {job['done_count']} " + T("ملف"))
+    else:
+        notify(T("اكتمل التنزيل ✓"), name)
+
+
+# ---------------------------------------------------------------- watching the clipboard for video links
+CLIP = {"last": None, "seq": None, "suggest": None}
+
+
+def read_clipboard():
+    import subprocess
+    test = os.environ.get("MO_CLIP_FILE")
+    if test:
+        try:
+            return Path(test).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    if SYSTEM == "Windows":
+        import ctypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        seq = u.GetClipboardSequenceNumber()
+        if seq == CLIP["seq"]:
+            return CLIP["last"] or ""
+        CLIP["seq"] = seq
+        u.GetClipboardData.restype = ctypes.c_void_p
+        k.GlobalLock.restype = ctypes.c_void_p
+        k.GlobalLock.argtypes = k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        if not u.OpenClipboard(None):
+            return CLIP["last"] or ""
+        try:
+            h = u.GetClipboardData(13)  # CF_UNICODETEXT
+            if not h:
+                return ""
+            ptr = k.GlobalLock(h)
+            try:
+                return ctypes.wstring_at(ptr) if ptr else ""
+            finally:
+                k.GlobalUnlock(h)
+        finally:
+            u.CloseClipboard()
+    cmds = [["pbpaste"]] if SYSTEM == "Darwin" else [["wl-paste", "-n"], ["xclip", "-o", "-selection", "clipboard"],
+                                                    ["xsel", "-ob"]]
+    for c in cmds:
+        if shutil.which(c[0]):
+            try:
+                return subprocess.run(c, capture_output=True, text=True, timeout=2).stdout
+            except Exception:  # noqa: BLE001
+                return ""
+    return ""
+
+
+def link_worth_suggesting(url):
+    if re.search(r"\.(mp4|mkv|webm|mov|m4v|mp3|m4a|flac|wav|ogg|opus|m3u8|mpd)(\?|$)", url, re.I):
+        return True
+    try:
+        for ie in yt_dlp.extractor.gen_extractor_classes():
+            if ie.ie_key() != "Generic" and ie.suitable(url):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    site = gallery_site(url)
+    return bool(site and site != "directlink")
+
+
+def clipboard_loop():
+    while True:
+        time.sleep(1.5)
+        if not SETTINGS.get("clipboard"):
+            CLIP["last"] = None
+            continue
+        try:
+            text = (read_clipboard() or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if text == CLIP["last"]:
+            continue
+        first = CLIP["last"] is None
+        CLIP["last"] = text
+        if first and not os.environ.get("MO_CLIP_FILE"):
+            continue  # what was already copied before turning this on is not "new"
+        m = re.fullmatch(r"https?://\S+", text)
+        if m and len(text) < 2000 and link_worth_suggesting(text):
+            CLIP["suggest"] = {"url": text, "ts": time.time(), "id": uuid.uuid4().hex[:8]}
+            notify(T("رابط فيديو في الحافظة"), text[:120])
+
+
+# ---------------------------------------------------------------- links sent from a phone on the same network
+PHONE = {"server": None, "port": None, "fails": {}, "lock": threading.Lock()}
+PHONE_PORT = int(os.environ.get("MD_PHONE_PORT", 8790))
+
+
+def lan_ip():
+    import socket
+    s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s_.connect(("192.0.2.1", 9))  # no packet is sent: this only picks the network card used for the LAN
+        return s_.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s_.close()
+
+
+def phone_url():
+    return f"http://{lan_ip()}:{PHONE['port']}/m?k={SETTINGS.get('phone_key')}" if PHONE["port"] else ""
+
+
+def phone_qr_svg(text):
+    segno = ensure("segno", required=False)
+    if not segno or not text:
+        return ""
+    import io
+    buf = io.BytesIO()
+    segno.make(text, error="m").save(buf, kind="svg", scale=5, border=2, dark="#0e3b2e", xmldecl=False, svgns=True)
+    return buf.getvalue().decode()
+
+
+PHONE_PAGE = """<!doctype html><html lang="{lang}" dir="{dir}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>MO Downloader</title>
+<style>body{{font-family:system-ui,sans-serif;background:#f4f1ea;margin:0;padding:18px;color:#1d2a26}}
+.c{{background:#fffdf7;border-radius:14px;padding:18px;max-width:520px;margin:auto;box-shadow:0 2px 10px #0001}}
+h1{{font-size:20px;margin:0 0 12px}} textarea,input,select,button{{width:100%;box-sizing:border-box;font-size:16px;
+padding:11px;border-radius:10px;border:1px solid #cfc8b8;margin:6px 0}} button{{background:#0f6b54;color:#fff;border:0;
+font-weight:700}} #m{{margin-top:10px;font-weight:600}}</style></head><body><div class="c">
+<h1>MO Downloader</h1><form id="f"><textarea id="u" rows="3" placeholder="https://…" required dir="ltr"></textarea>
+<select id="q"><option value="best">{best}</option><option value="1080">1080p</option><option value="720">720p</option>
+<option value="audio">{audio}</option></select><input id="p" type="password" inputmode="numeric" placeholder="{pin}" required>
+<button>{send}</button></form><div id="m"></div></div><script>
+const k=new URLSearchParams(location.search).get("k");p.value=localStorage.getItem("mo-pin")||"";
+f.onsubmit=async e=>{{e.preventDefault();m.textContent="…";const r=await fetch("/m/add",{{method:"POST",
+headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{k,pin:p.value,url:u.value,preset:q.value}})}});
+const j=await r.json().catch(()=>({{}}));if(r.ok){{localStorage.setItem("mo-pin",p.value);u.value="";m.style.color="#0f6b54";
+m.textContent="{ok}"}}else{{m.style.color="#a33";m.textContent=j.error||r.status}}}};</script></body></html>"""
+
+
+class PhoneHandler(BaseHTTPRequestHandler):
+    server_version = "MODownloader-phone"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _key_ok(self, k):
+        return bool(SETTINGS.get("phone") and SETTINGS.get("phone_key")) and secrets.compare_digest(str(k or ""), SETTINGS["phone_key"])
+
+    def do_GET(self):  # noqa: N802
+        u = urlparse(self.path)
+        if u.path != "/m" or not self._key_ok(parse_qs(u.query).get("k", [""])[0]):
+            return self._send(404, b"not found", "text/plain")
+        en = SETTINGS.get("lang") == "en"
+        page = PHONE_PAGE.format(lang="en" if en else "ar", dir="ltr" if en else "rtl", best=T("أفضل جودة"),
+                                 audio=T("صوت MP3"), pin=T("كلمة المرور"), send=T("أرسل إلى الكمبيوتر"),
+                                 ok=T("أُرسل ✓ — بدأ التنزيل على الكمبيوتر"))
+        self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
+    def do_POST(self):  # noqa: N802
+        if urlparse(self.path).path != "/m/add":
+            return self._send(404, {"error": "not found"})
+        ip = self.client_address[0]
+        with PHONE["lock"]:
+            f = PHONE["fails"].get(ip, [0, 0])
+            if f[0] >= 5 and time.time() - f[1] < 300:
+                return self._send(429, {"error": T("محاولات خاطئة كثيرة — انتظر 5 دقائق.")})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            req = json.loads(self.rfile.read(min(n, 20000)) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "bad request"})
+        if not self._key_ok(req.get("k")):
+            return self._send(404, {"error": "not found"})
+        if not SETTINGS.get("phone_pin") or not secrets.compare_digest(str(req.get("pin") or ""), str(SETTINGS["phone_pin"])):
+            with PHONE["lock"]:
+                f = PHONE["fails"].get(ip, [0, 0])
+                PHONE["fails"][ip] = [f[0] + 1 if time.time() - f[1] < 300 else 1, time.time()]
+            return self._send(403, {"error": T("كلمة المرور غير صحيحة.")})
+        PHONE["fails"].pop(ip, None)
+        urls = re.findall(r"https?://[^\s<>\"']+", str(req.get("url") or ""))
+        if not urls:
+            return self._send(400, {"error": T("لم أجد أي رابط.")})
+        preset = str(req.get("preset") or "best")
+        preset = preset if preset in ("best", "audio") or preset.isdigit() else "best"
+        for u in urls[:20]:
+            new_job({"url": u, "mode": "preset", "preset": preset, "audio_convert": "mp3" if preset == "audio" else "original"},
+                    label=("MP3" if preset == "audio" else "أفضل جودة" if preset == "best" else preset + "p"),
+                    source="phone", source_label="من الجوال")
+        notify(T("رابط من الجوال"), urls[0][:120])
+        self._send(200, {"ok": True, "count": len(urls[:20])})
+
+
+def phone_apply():
+    """Start or stop the phone listener to match the settings."""
+    want = bool(SETTINGS.get("phone") and SETTINGS.get("phone_pin"))
+    if want and not SETTINGS.get("phone_key"):
+        SETTINGS["phone_key"] = secrets.token_urlsafe(12)
+        save_settings()
+    if want and not PHONE["server"]:
+        for port in range(PHONE_PORT, PHONE_PORT + 10):
+            try:
+                srv = ThreadingHTTPServer(("0.0.0.0", port), PhoneHandler)
+            except OSError:
+                continue
+            PHONE.update(server=srv, port=port)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            log(f"[phone] listening on the local network, port {port}")
+            break
+    elif not want and PHONE["server"]:
+        srv = PHONE["server"]
+        PHONE.update(server=None, port=None)
+        threading.Thread(target=lambda: (srv.shutdown(), srv.server_close()), daemon=True).start()
+        log("[phone] stopped")
+
+
+# ---------------------------------------------------------------- previews inside the window
+MEDIA_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+               ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+               ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac", ".wav": "audio/wav"}
+
+
+def preview_allowed(path):
+    """Only files the app downloaded or made (in the history) or anything under the downloads folder."""
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        return False
+    if not p.is_file() or p.suffix.lower() not in MEDIA_TYPES:
+        return False
+    roots = {Path(SETTINGS["outdir"]).resolve()}
+    if any(r == p or r in p.parents for r in roots):
+        return True
+    with HISTORY_LOCK:
+        return bool(HISTORY.execute("SELECT 1 FROM history WHERE file=? LIMIT 1", (str(path),)).fetchone())
+
+
+# ---------------------------------------------------------------- export / import
+def export_data():
+    with HISTORY_LOCK:
+        hist = [_history_row(r) for r in HISTORY.execute("SELECT * FROM history ORDER BY n").fetchall()]
+    with SUBS_LOCK:
+        subs = [{**s_, "_seen": sorted(read_set(sub_archive_path(s_["id"])))} for s_ in SUBS]
+    keep = {k: v for k, v in SETTINGS.items() if k not in ("engine_checked", "update_checked", "phone_key")}
+    data = {"app": APP_NAME, "version": APP_VERSION, "exported": time.strftime("%Y-%m-%d %H:%M"), "settings": keep,
+            "subs": subs, "history": hist, "archive": sorted(ARCHIVE)}
+    out = _free_name(Path(SETTINGS["outdir"]) / f"MO-Downloader-backup-{time.strftime('%Y-%m-%d')}.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    private_file(out)
+    return {"ok": True, "file": str(out), "history": len(hist), "subs": len(subs)}
+
+
+def import_data(data, parts):
+    if not isinstance(data, dict) or data.get("app") != APP_NAME:
+        raise ValueError("هذا ليس ملف نسخة احتياطية من MO Downloader.")
+    got = {}
+    if "settings" in parts and isinstance(data.get("settings"), dict):
+        for k, v in data["settings"].items():
+            if k in DEFAULT_SETTINGS and k not in ("engine_checked", "update_checked", "phone_key") and type(v) in (
+                    type(DEFAULT_SETTINGS[k]), int, float, str, bool):
+                SETTINGS[k] = v
+        save_settings()
+        phone_apply()
+        got["settings"] = True
+    if "subs" in parts:
+        n = 0
+        with SUBS_LOCK:
+            have = {s_["url"] for s_ in SUBS}
+            for s_ in data.get("subs") or []:
+                if not isinstance(s_, dict) or not s_.get("url") or s_["url"] in have:
+                    continue
+                seen = s_.pop("_seen", []) or []
+                s_["id"] = uuid.uuid4().hex[:8]
+                SUBS.append(s_)
+                have.add(s_["url"])
+                if seen:
+                    sub_archive_path(s_["id"]).write_text("".join(x + "\n" for x in seen), encoding="utf-8")
+                n += 1
+            save_subs()
+        got["subs"] = n
+    if "history" in parts:
+        with HISTORY_LOCK:
+            have = {(r["key"], round(r["date"] or 0, 2)) for r in HISTORY.execute("SELECT key, date FROM history")}
+            new = [h for h in data.get("history") or [] if isinstance(h, dict)
+                   and (h.get("key"), round(h.get("date") or 0, 2)) not in have]
+            _history_insert(HISTORY, new)
+            HISTORY.commit()
+            for k in data.get("archive") or []:
+                if isinstance(k, str) and k not in ARCHIVE:
+                    ARCHIVE.add(k)
+                    append_line(ARCHIVE_FILE, k)
+        got["history"] = len(new)
+    return {"ok": True, **got}
+
+
+# ---------------------------------------------------------------- updating the app itself
+UPDATE = {"state": "", "msg": "", "latest": None, "file": None, "notes": "", "page": None}
+
+
+def _asset_for_me(assets):
+    import platform
+    want = ("-Setup.exe",) if SYSTEM == "Windows" and FROZEN else \
+        (("-mac-arm64.dmg",) if platform.machine() == "arm64" else ("-mac-x64.dmg",)) if SYSTEM == "Darwin" and FROZEN else \
+        (".zip",)
+    for a in assets or []:
+        if any(str(a.get("name", "")).endswith(w) for w in want) and "full" not in a.get("name", ""):
+            return a
+    return None
+
+
+def update_check(download=True):
+    """Look at the latest release; if it is newer, download the file for this computer (and check its fingerprint)."""
+    import hashlib
+    url = SETTINGS.get("update_url")
+    if not url:
+        return UPDATE
+    UPDATE.update(state="checking", msg="جارٍ البحث عن إصدار جديد…")
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": APP_NAME})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rel = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        UPDATE.update(state="error", msg="صفحة الإصدارات غير متاحة للبرنامج (المستودع خاص) — حدّث يدوياً من صفحة الإصدارات."
+                      if e.code in (401, 403, 404) else f"تعذّر البحث عن تحديث (HTTP {e.code}).")
+        return UPDATE
+    except Exception as e:  # noqa: BLE001
+        UPDATE.update(state="error", msg=f"تعذّر البحث عن تحديث: {e}")
+        return UPDATE
+    SETTINGS["update_checked"] = time.time()
+    save_settings()
+    tag = str(rel.get("tag_name") or "").lstrip("vV")
+    UPDATE.update(latest=tag, notes=(rel.get("body") or "")[:3000], page=rel.get("html_url"))
+    if not tag or _ver_key(tag) <= _ver_key(APP_VERSION):
+        UPDATE.update(state="current", msg=f"لديك أحدث إصدار ({APP_VERSION}).")
+        return UPDATE
+    asset = _asset_for_me(rel.get("assets"))
+    if not asset:
+        UPDATE.update(state="available", msg=f"يوجد إصدار جديد {tag} — نزّله من صفحة الإصدارات.")
+        return UPDATE
+    if not download:
+        UPDATE.update(state="available", msg=f"يوجد إصدار جديد {tag}.")
+        return UPDATE
+    d = APP_DATA / "updates"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / asset["name"]
+    UPDATE.update(state="downloading", msg=f"جارٍ تنزيل الإصدار {tag}…")
+    try:
+        req = urllib.request.Request(asset.get("browser_download_url") or asset["url"],
+                                     headers={"Accept": "application/octet-stream", "User-Agent": APP_NAME})
+        h = hashlib.sha256()
+        tmp = out.with_suffix(out.suffix + ".part")
+        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+            for chunk in iter(lambda: r.read(1 << 16), b""):
+                f.write(chunk)
+                h.update(chunk)
+        size, digest = tmp.stat().st_size, str(asset.get("digest") or "")
+        if asset.get("size") and size != int(asset["size"]):
+            raise ValueError(f"الحجم لا يطابق ({size} بدل {asset['size']})")
+        if digest.startswith("sha256:") and digest[7:].lower() != h.hexdigest():
+            raise ValueError("البصمة لا تطابق — لن يُثبَّت هذا الملف.")
+        tmp.replace(out)
+    except Exception as e:  # noqa: BLE001
+        Path(str(out) + ".part").unlink(missing_ok=True)
+        UPDATE.update(state="error", msg=f"تعذّر تنزيل التحديث: {e}")
+        return UPDATE
+    UPDATE.update(state="ready", file=str(out), msg=f"الإصدار {tag} جاهز للتثبيت.")
+    notify(T("تحديث جاهز"), f"MO Downloader {tag}")
+    return UPDATE
+
+
+def update_install():
+    import subprocess
+    f = UPDATE.get("file")
+    if UPDATE.get("state") != "ready" or not f or not os.path.exists(f):
+        raise ValueError("لا يوجد تحديث جاهز.")
+    if f.endswith(".exe"):
+        save_queue()
+        subprocess.Popen([f, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"], creationflags=0x00000008)
+        threading.Thread(target=lambda: (time.sleep(1.5), quit_app()), daemon=True).start()
+        return {"ok": True, "msg": "يُثبَّت التحديث الآن وسيفتح البرنامج من جديد."}
+    open_path(f, play=True)  # a .dmg (drag the app into Applications) or the source .zip
+    return {"ok": True, "msg": "فُتح ملف التحديث — اسحب التطبيق إلى مجلد التطبيقات واستبدل القديم." if f.endswith(".dmg")
+            else "فُتح ملف التحديث."}
+
+
+def update_loop():
+    time.sleep(60)
+    while True:
+        if SETTINGS.get("update_url") and time.time() - float(SETTINGS.get("update_checked") or 0) > 86400:
+            update_check(download=FROZEN)
+        time.sleep(3600)
 
 
 def pause_job(j):
@@ -1907,10 +2645,17 @@ def new_job(req, label="", source="single", source_label=""):
         if b is not None and b <= (a or 0):
             raise ValueError("وقت النهاية يجب أن يكون بعد وقت البداية.")
     job_id = uuid.uuid4().hex[:10]
+    stage = "في الطابور"
+    if req.get("start_at"):
+        at = float(req["start_at"])
+        if at > time.time() + 2:
+            stage = "مجدول — يبدأ " + time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+        else:
+            req.pop("start_at", None)
     with QUEUE:
         JOBS[job_id] = {
             "id": job_id, "title": req.get("title") or req["url"], "url": req["url"], "status": "queued",
-            "stage": "في الطابور", "percent": 0, "created": time.time(), "label": label,
+            "stage": stage, "percent": 0, "created": time.time(), "label": label, "start_at": req.get("start_at"),
             "source": source, "source_label": source_label, "sub_id": req.get("sub_id"),
             "many": bool(req.get("playlist") or req.get("sub_id")), "_req": req,
         }
@@ -1930,7 +2675,9 @@ def scheduler_loop():
             slots = max(1, min(6, int(SETTINGS.get("max_parallel") or 2))) - running
             if slots <= 0:
                 continue
-            queued = sorted((j for j in JOBS.values() if j["status"] == "queued"), key=lambda j: j["created"])
+            now = time.time()
+            queued = sorted((j for j in JOBS.values() if j["status"] == "queued"
+                             and float((j.get("_req") or {}).get("start_at") or 0) <= now), key=lambda j: j["created"])
             for j in queued[:slots]:
                 j.update(status="starting", stage="جارٍ التحضير", started=time.time())
                 threading.Thread(target=run_job, args=(j["id"],), daemon=True).start()
@@ -2110,6 +2857,22 @@ def subs_loop():
 
 
 # ---------------------------------------------------------------- start with the computer
+def app_icon_file():
+    """An .ico of the logo for the Python version (next to the script, or written from the built-in logo)."""
+    f = Path(__file__).with_name("mo_downloader.ico")
+    if f.exists():
+        return str(f)
+    out = APP_DATA / "mo_downloader.ico"
+    if not out.exists():
+        try:
+            import io
+            from PIL import Image
+            Image.open(io.BytesIO(LOGO_PNG)).convert("RGBA").save(out, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128)])
+        except Exception:  # noqa: BLE001
+            return None
+    return str(out)
+
+
 def app_icon_path():
     if FROZEN:
         return sys.executable
@@ -2243,19 +3006,77 @@ def register_native_host():
         log(f"[native] browser helper not registered: {e}")
 
 
-def open_path(path, select=False):
-    p = Path(path)
+class OpenError(Exception):
+    pass
+
+
+def _win_select(p):
+    """Open the folder in Explorer with the file selected (the shell's own call: no quoting problems with
+    spaces, commas or Arabic names, unlike "explorer /select,")."""
+    import ctypes
+    from ctypes import wintypes
+    shell32, ole32 = ctypes.windll.shell32, ctypes.windll.ole32
+    ole32.CoInitialize(None)
+    shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+    shell32.ILCreateFromPathW.argtypes = [wintypes.LPCWSTR]
+    shell32.SHOpenFolderAndSelectItems.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, wintypes.DWORD]
+    shell32.ILFree.argtypes = [ctypes.c_void_p]
+    pidl = shell32.ILCreateFromPathW(str(p))
+    if not pidl:
+        raise OSError("ILCreateFromPathW failed")
+    try:
+        hr = shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+        if hr != 0:
+            raise OSError(f"SHOpenFolderAndSelectItems 0x{hr & 0xFFFFFFFF:08x}")
+    finally:
+        shell32.ILFree(pidl)
+
+
+def open_path(path, select=False, play=False):
+    """Show a folder, show a file selected in its folder, or (play) open the file in the system's own player.
+    Raises OpenError with an Arabic reason the page shows to the user."""
+    p = Path(path) if path else Path(SETTINGS["outdir"])
     if not p.exists():
-        p = p.parent if p.parent.exists() else Path(SETTINGS["outdir"])
-    if SYSTEM == "Windows":
-        if select and p.is_file():
-            subprocess.Popen(["explorer", "/select,", str(p)])
+        if play:
+            raise OpenError("الملف غير موجود — ربما نُقل أو حُذف أو غُيّر اسمه.")
+        if not path or Path(path) == Path(SETTINGS["outdir"]):
+            try:
+                p.mkdir(parents=True, exist_ok=True)  # the downloads folder before the first download
+            except OSError as e:
+                raise OpenError(f"تعذّر إنشاء مجلد التنزيلات: {p} ({e.strerror or e})")
         else:
-            os.startfile(str(p if p.is_dir() else p.parent))  # type: ignore[attr-defined]
-    elif SYSTEM == "Darwin":
-        subprocess.Popen(["open", "-R", str(p)] if select and p.is_file() else ["open", str(p)])
-    else:
-        subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+            p = next((x for x in Path(path).parents if x.exists()), Path(SETTINGS["outdir"]))
+            select = False
+            if not p.exists():
+                raise OpenError("المجلد غير موجود — ربما فُصل القرص أو نُقل المجلد.")
+    log(f"[open] {'play' if play else 'select' if select else 'open'}: {p}")
+    try:
+        if SYSTEM == "Windows":
+            try:  # let the window that opens come to the front instead of flashing in the taskbar
+                import ctypes
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+            except Exception:  # noqa: BLE001
+                pass
+            if play:
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif select and p.is_file():
+                try:
+                    _win_select(p)
+                except Exception as e:  # noqa: BLE001
+                    log(f"[open] shell select failed ({e}); using explorer")
+                    subprocess.Popen(f'explorer /select,"{p}"')
+            else:
+                os.startfile(str(p if p.is_dir() else p.parent))  # type: ignore[attr-defined]
+        elif SYSTEM == "Darwin":
+            subprocess.Popen(["open", str(p)] if play or not (select and p.is_file()) else ["open", "-R", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p if play or p.is_dir() else p.parent)])
+    except OSError as e:
+        log(f"[open] failed: {e}")
+        if play and getattr(e, "winerror", None) in (1155, 1156):
+            raise OpenError("لا يوجد على جهازك برنامج يفتح هذا النوع من الملفات.")
+        raise OpenError(f"تعذّر الفتح: {e.strerror or e}")
+    return {"ok": True}
 
 
 def history_query(q="", limit=100, offset=0):
@@ -2387,6 +3208,46 @@ def pick_folder(initial=""):
     return out
 
 
+def pick_file(initial=""):
+    """Native 'choose a file' dialog (for the tools). Returns a path or None."""
+    initial = initial if initial and os.path.isdir(initial) else str(Path.home())
+    title = "اختر ملف فيديو أو صوت"
+    win = UI.get("win")
+    if win is not None:
+        try:
+            import webview
+            r = win.create_file_dialog(getattr(webview, "FileDialog", webview).OPEN if hasattr(webview, "FileDialog")
+                                       else webview.OPEN_DIALOG, directory=initial)
+            return (r[0] if isinstance(r, (list, tuple)) else r) if r else None
+        except Exception as e:  # noqa: BLE001
+            log(f"[pick] window file dialog failed: {e}")
+    if not PICK_LOCK.acquire(blocking=False):
+        raise ValueError("نافذة الاختيار مفتوحة بالفعل.")
+    try:
+        if SYSTEM == "Darwin":
+            esc = initial.replace('"', '\\"')
+            r = subprocess.run(["osascript", "-e", f'activate\nset f to choose file with prompt "{title}" default location '
+                                f'(POSIX file "{esc}")\nPOSIX path of f'], capture_output=True, timeout=900)
+            return r.stdout.decode("utf-8", "replace").strip() or None
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            root.update()
+            path = filedialog.askopenfilename(parent=root, initialdir=initial, title=title)
+        finally:
+            root.destroy()
+        return os.path.normpath(path) if path else None
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception as e:  # noqa: BLE001
+        raise ValueError("تعذّر فتح نافذة اختيار الملف. الصق مسار الملف في الخانة يدوياً.\n" + str(e)[:200]) from e
+    finally:
+        PICK_LOCK.release()
+
+
 def proxy_test(proxy):
     proxy = str(proxy or "").strip()
     if not proxy:
@@ -2498,11 +3359,11 @@ def start_windows_tray():
     from PIL import Image
     image = Image.open(io.BytesIO(LOGO_PNG)).convert("RGBA").resize((64, 64))
     menu = pystray.Menu(
-        pystray.MenuItem(TRAY_TEXT["show"], lambda *a: show_window(), default=True),
-        pystray.MenuItem(TRAY_TEXT["pause"], lambda *a: pause_all()),
-        pystray.MenuItem(TRAY_TEXT["resume"], lambda *a: resume_all()),
+        pystray.MenuItem(T(TRAY_TEXT["show"]), lambda *a: show_window(), default=True),
+        pystray.MenuItem(T(TRAY_TEXT["pause"]), lambda *a: pause_all()),
+        pystray.MenuItem(T(TRAY_TEXT["resume"]), lambda *a: resume_all()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem(TRAY_TEXT["quit"], lambda icon, item: (icon.stop(), _tray_quit())),
+        pystray.MenuItem(T(TRAY_TEXT["quit"]), lambda icon, item: (icon.stop(), _tray_quit())),
     )
     icon = pystray.Icon("MO Downloader", image, APP_NAME, menu)
     threading.Thread(target=icon.run, daemon=True).start()
@@ -2540,8 +3401,8 @@ def start_mac_status_item():
     item.button().setImage_(img)
     item.button().setToolTip_(APP_NAME)
     menu = AppKit.NSMenu.alloc().init()
-    for title, sel in ((TRAY_TEXT["show"], "show:"), (TRAY_TEXT["pause"], "pauseAll:"), (TRAY_TEXT["resume"], "resumeAll:"),
-                       (None, None), (TRAY_TEXT["quit"], "quit:")):
+    for title, sel in ((T(TRAY_TEXT["show"]), "show:"), (T(TRAY_TEXT["pause"]), "pauseAll:"),
+                       (T(TRAY_TEXT["resume"]), "resumeAll:"), (None, None), (T(TRAY_TEXT["quit"]), "quit:")):
         if title is None:
             menu.addItem_(AppKit.NSMenuItem.separatorItem())
             continue
@@ -2608,7 +3469,7 @@ def run_window(url, hidden):
             if SYSTEM == "Windows" and tray is not None and not UI.get("told_tray"):
                 UI["told_tray"] = True
                 try:
-                    tray.notify("ما زال يعمل — أيقونته بجانب الساعة.", APP_NAME)
+                    tray.notify(T("ما زال يعمل — أيقونته بجانب الساعة."), APP_NAME)
                 except Exception:  # noqa: BLE001
                     pass
             return False
@@ -2639,7 +3500,17 @@ def run_window(url, hidden):
     gui = os.environ.get("MO_GUI") or ("edgechromium" if SYSTEM == "Windows" else "cocoa" if SYSTEM == "Darwin" else "qt")
     UI["gui"] = gui or "native"
     (APP_DATA / "webview").mkdir(parents=True, exist_ok=True)
-    webview.start(start_tray, gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"))
+    icon = None
+    if SYSTEM == "Windows":
+        try:  # own taskbar group + icon (otherwise the Python version shows up as pythonw with Python's logo)
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MO.Downloader")
+        except Exception:  # noqa: BLE001
+            pass
+        if not FROZEN:
+            icon = app_icon_file()
+    webview.start(start_tray, gui=gui, private_mode=False, storage_path=str(APP_DATA / "webview"),
+                  **({"icon": icon} if icon else {}))
     if UI.get("tray") is not None and SYSTEM == "Windows":
         try:
             UI["tray"].stop()
@@ -2834,6 +3705,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_file(self, p):
+        size = p.stat().st_size
+        rng = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+        start, end = 0, size - 1
+        if rng and (rng.group(1) or rng.group(2)):
+            if rng.group(1):
+                start = int(rng.group(1))
+                end = int(rng.group(2)) if rng.group(2) else size - 1
+            else:
+                start = max(0, size - int(rng.group(2)))
+            end = min(end, size - 1)
+            if start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return None
+        self.send_response(206 if rng else 200)
+        self.send_header("Content-Type", MEDIA_TYPES.get(p.suffix.lower(), "application/octet-stream"))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if rng:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(p, "rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(1 << 16, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return None
+
     def _authorized(self):
         return self.headers.get("X-Token") == TOKEN
 
@@ -2924,13 +3832,15 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/logo.png", "/favicon.ico"):
             return self._send(200, LOGO_PNG, "image/png")
         if u.path == "/api/ping":
-            return self._send(200, {"app": APP_NAME})
+            return self._send(200, {"app": APP_NAME, "version": APP_VERSION, "frozen": FROZEN, "busy": busy()})
         if u.path in ("/", "/index.html"):
-            html = PAGE.replace("__TOKEN__", TOKEN)
+            html = PAGE.replace("__TOKEN__", TOKEN).replace('"__LANG__"', json.dumps(SETTINGS.get("lang") or "ar"))
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
-        if not self._authorized():
-            return self._send(403, {"error": "forbidden"})
         qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/api/media" and qs.get("t"):
+            pass
+        elif not self._authorized():
+            return self._send(403, {"error": "forbidden"})
         if u.path == "/api/jobs":
             with JOBS_LOCK:
                 jobs = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)[:200]
@@ -2945,7 +3855,20 @@ class Handler(BaseHTTPRequestHandler):
                 "gallery": ENGINE.get("gallery"), "impersonate": IMPERSONATE,
                 "engine": {"channel": SETTINGS.get("engine_channel", "stable"), "updating": ENGINE["updating"],
                            "msg": ENGINE["msg"], "pending": ENGINE["pending"]},
+                "clip": CLIP["suggest"] if CLIP["suggest"] and time.time() - CLIP["suggest"]["ts"] < 180 else None,
+                "phone": {"on": bool(PHONE["server"]), "url": phone_url()},
+                "update": {k: v for k, v in UPDATE.items() if k != "file"},
+                "tpl_example": tpl_example(SETTINGS.get("name_tpl"), SETTINGS.get("folder_tpl")),
+                "presets": {k: v["label"] for k, v in TOOL_PRESETS.items()},
             })
+        if u.path == "/api/media":
+            # previews: <video> can't send headers, so the token comes in the address
+            if not secrets.compare_digest(qs.get("t", ""), TOKEN) or not preview_allowed(qs.get("path", "")):
+                return self._send(403, {"error": "forbidden"})
+            return self._send_file(Path(qs["path"]))
+        if u.path == "/api/clip":
+            c = CLIP["suggest"]
+            return self._send(200, {"clip": c if c and time.time() - c["ts"] < 180 else None})
         if u.path == "/api/sites":
             return self._send(200, {"sites": supported_sites()})
         if u.path == "/api/history":
@@ -2972,6 +3895,29 @@ class Handler(BaseHTTPRequestHandler):
                 src = "playlist" if req.get("playlist") else "single"
                 return self._send(200, {"id": new_job(req, label=req.get("label") or "", source=src,
                                                       source_label="قائمة تشغيل" if req.get("playlist") else "")})
+            if p == "/api/tool":
+                return self._send(200, {"id": tool_job(req)})
+            if p == "/api/probe":
+                if not Path(str(req.get("path") or "")).is_file():
+                    raise ValueError("الملف غير موجود.")
+                return self._send(200, {**probe_media(req["path"]), "name": Path(req["path"]).name})
+            if p == "/api/pick_file":
+                path = pick_file(req.get("initial") or SETTINGS["outdir"])
+                return self._send(200, {"path": path} if path else {"cancelled": True})
+            if p == "/api/clip_dismiss":
+                CLIP["suggest"] = None
+                return self._send(200, {"ok": True})
+            if p == "/api/phone":
+                return self._send(200, {"on": bool(PHONE["server"]), "url": phone_url(), "svg": phone_qr_svg(phone_url())})
+            if p == "/api/export":
+                return self._send(200, export_data())
+            if p == "/api/import":
+                return self._send(200, import_data(req.get("data"), set(req.get("parts") or ["settings", "subs", "history"])))
+            if p == "/api/update_check":
+                threading.Thread(target=update_check, kwargs={"download": True}, daemon=True).start()
+                return self._send(200, {"ok": True})
+            if p == "/api/update_install":
+                return self._send(200, update_install())
             if p == "/api/batch":
                 return self._send(200, batch_jobs(req))
             if p == "/api/cancel":
@@ -3037,8 +3983,11 @@ class Handler(BaseHTTPRequestHandler):
                         del JOBS[k]
                 return self._send(200, {"ok": True})
             if p == "/api/open":
-                open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")))
-                return self._send(200, {"ok": True})
+                try:
+                    return self._send(200, open_path(req.get("path") or SETTINGS["outdir"], select=bool(req.get("select")),
+                                                     play=bool(req.get("play"))))
+                except OpenError as e:
+                    return self._send(200, {"ok": False, "error": str(e)})
             if p == "/api/pick_folder":
                 path = pick_folder(req.get("initial") or SETTINGS["outdir"])
                 return self._send(200, {"path": path} if path else {"cancelled": True})
@@ -3093,8 +4042,39 @@ class Handler(BaseHTTPRequestHandler):
                     changed["ui"] = req["ui"]
                 if req.get("engine_channel") in ("stable", "nightly"):
                     changed["engine_channel"] = req["engine_channel"]
+                if req.get("lang") in ("ar", "en"):
+                    changed["lang"] = req["lang"]
+                if "rate_limit_kb" in req:
+                    changed["rate_limit_kb"] = max(0, min(10_000_000, int(req["rate_limit_kb"] or 0)))
+                if "name_tpl" in req:
+                    changed["name_tpl"] = tpl_check(req["name_tpl"])
+                if "folder_tpl" in req:
+                    changed["folder_tpl"] = tpl_check(req["folder_tpl"], folder=True)
+                for k in ("notify", "clipboard", "phone"):
+                    if k in req:
+                        changed[k] = bool(req[k])
+                if "phone_pin" in req:
+                    pin = str(req["phone_pin"] or "").strip()
+                    if pin and not re.fullmatch(r"\d{4,10}", pin):
+                        raise ValueError("كلمة مرور الجوال: من 4 إلى 10 أرقام.")
+                    changed["phone_pin"] = pin
+                if changed.get("phone") and not (changed.get("phone_pin") or SETTINGS.get("phone_pin")):
+                    raise ValueError("اختر كلمة مرور للجوال أولاً (من 4 إلى 10 أرقام).")
+                if req.get("phone_new_key"):
+                    changed["phone_key"] = secrets.token_urlsafe(12)
+                if "sub3d_cmd" in req:
+                    cmd = str(req["sub3d_cmd"] or "").strip()
+                    if cmd and "{file}" not in cmd:
+                        raise ValueError("أمر الترجمة ثلاثية الأبعاد يجب أن يحتوي {file} مكان ملف الترجمة.")
+                    changed["sub3d_cmd"] = cmd
+                if "update_url" in req:
+                    uu = str(req["update_url"] or "").strip()
+                    if uu and not uu.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+                        raise ValueError("عنوان التحديثات يجب أن يبدأ بـ https://")
+                    changed["update_url"] = uu
                 SETTINGS.update(changed)
                 save_settings()
+                phone_apply()
                 if "autostart" in req:
                     set_autostart(bool(req["autostart"]))
                 with QUEUE:
@@ -3161,6 +4141,74 @@ def already_running(port):
     return None
 
 
+def replace_other_copy(port):
+    """The installed app was opened while the Python version (or an older installed copy) is running — e.g. one that
+    starts with Windows. Close that copy and take its place, unless it is downloading something."""
+    o = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        info = json.loads(o.open(f"http://127.0.0.1:{port}/api/ping", timeout=2).read())
+        if info.get("frozen") and info.get("version") == APP_VERSION:
+            return False  # the same installed app: just show it
+        if info.get("busy"):
+            log(f"[start] another copy ({info.get('version') or 'older'}) is downloading - leaving it open")
+            return False
+        page = o.open(f"http://127.0.0.1:{port}/", timeout=3).read().decode("utf-8", "replace")
+        tok = re.search(r'const TOKEN = "([^"]+)"', page).group(1)
+        o.open(urllib.request.Request(f"http://127.0.0.1:{port}/api/shutdown", data=b"{}",
+                                      headers={"X-Token": tok, "Content-Type": "application/json"}), timeout=5)
+    except Exception as e:  # noqa: BLE001
+        log(f"[start] could not replace the other copy: {e}")
+        return False
+    for _ in range(40):
+        time.sleep(0.25)
+        try:
+            o.open(f"http://127.0.0.1:{port}/api/ping", timeout=0.5)
+        except Exception:  # noqa: BLE001
+            log(f"[start] replaced the other copy ({info.get('version') or 'Python version'}) on port {port}")
+            return True
+    return False
+
+
+def repair_windows_links():
+    """Shortcuts named "MO Downloader" (desktop, Start menu, start-with-Windows) and the mo-downloader:// link
+    that the Python version's launcher pointed at itself go back to the installed app."""
+    try:
+        import winreg
+        exe = sys.executable
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\mo-downloader\shell\open\command") as k:
+            if exe.lower() not in str(winreg.QueryValueEx(k, "")[0] if _reg_has(k) else "").lower():
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}" "%1"')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\mo-downloader\DefaultIcon") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}",0')
+
+        def q(x):
+            return "'" + str(x).replace("'", "''") + "'"
+        ps = ("$ws=New-Object -ComObject WScript.Shell;$n=0;"
+              "foreach($d in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'),"
+              "[Environment]::GetFolderPath('Startup'))){"
+              "$f=Join-Path $d 'MO Downloader.lnk'; if(Test-Path -LiteralPath $f){ $s=$ws.CreateShortcut($f);"
+              f"if($s.TargetPath -ne {q(exe)}){{ $bg=($d -eq [Environment]::GetFolderPath('Startup'));"
+              f"$s.TargetPath={q(exe)};$s.Arguments=$(if($bg){{'--background'}}else{{''}});"
+              f"$s.WorkingDirectory={q(Path(exe).parent)};$s.IconLocation={q(exe + ',0')};$s.Save();$n++ }} }} }};$n")
+        enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+                           capture_output=True, text=True, creationflags=0x08000000, timeout=60)
+        n = (r.stdout or "").strip()
+        if n and n != "0":
+            log(f"[start] {n} shortcut(s) pointed back at the installed app")
+    except Exception as e:  # noqa: BLE001
+        log(f"[start] shortcuts not checked: {e}")
+
+
+def _reg_has(k):
+    import winreg
+    try:
+        winreg.QueryValueEx(k, "")
+        return True
+    except OSError:
+        return False
+
+
 SERVER = None
 
 
@@ -3178,6 +4226,10 @@ def main():
         log(f"[live] stop hook not installed: {e}")
     Path(SETTINGS["outdir"]).mkdir(parents=True, exist_ok=True)
     running_port = already_running(DEFAULT_PORT)
+    if running_port and FROZEN and replace_other_copy(running_port):
+        running_port = None
+    if FROZEN and SYSTEM == "Windows":
+        threading.Thread(target=repair_windows_links, daemon=True).start()
     if running_port:
         if not BACKGROUND:
             shown = False
@@ -3201,7 +4253,8 @@ def main():
         pass
     restore_queue()
     threading.Thread(target=register_native_host, daemon=True).start()
-    for target in (scheduler_loop, subs_loop, engine_update_check, fetch_aria2_windows):
+    phone_apply()
+    for target in (scheduler_loop, subs_loop, engine_update_check, fetch_aria2_windows, clipboard_loop, update_loop):
         threading.Thread(target=target, daemon=True).start()
     print("=" * 60)
     print(f"  MO Downloader {APP_VERSION} is running:  {url}")

@@ -5,8 +5,8 @@
   <key>CFBundleName</key><string>MO Downloader</string>
   <key>CFBundleDisplayName</key><string>MO Downloader</string>
   <key>CFBundleIdentifier</key><string>local.mo.downloader</string>
-  <key>CFBundleVersion</key><string>2.6</string>
-  <key>CFBundleShortVersionString</key><string>2.6</string>
+  <key>CFBundleVersion</key><string>2.7</string>
+  <key>CFBundleShortVersionString</key><string>2.7</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>MO Downloader</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>

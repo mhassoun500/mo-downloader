@@ -63,6 +63,8 @@ Root: HKCU; Subkey: "Software\Classes\mo-downloader\shell\open\command"; ValueTy
 Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft WebView2…"; Flags: waituntilterminated; Check: NeedsWebView2
 #endif
 Filename: "{app}\MO Downloader.exe"; Description: "{cm:LaunchProgram,MO Downloader}"; Flags: nowait postinstall skipifsilent
+; an update installed from inside the app (silent, /RELAUNCH=1) opens the app again when it is done
+Filename: "{app}\MO Downloader.exe"; Flags: nowait; Check: WantRelaunch
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ""MO Downloader.exe"""; Flags: runhidden; RunOnceId: "StopApp"
@@ -75,6 +77,11 @@ function HasWebView2(Root: Integer; Key: String): Boolean;
 var v: String;
 begin
   Result := RegQueryStringValue(Root, Key, 'pv', v) and (v <> '') and (v <> '0.0.0.0');
+end;
+
+function WantRelaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
 end;
 
 function NeedsWebView2: Boolean;

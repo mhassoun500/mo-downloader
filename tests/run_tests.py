@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -56,6 +57,20 @@ def make_media(root):
         shutil.copy(root / "clip.mp4", root / f"clip{i}.mp4")
     (root / "list-ch.txt").write_text("clip4.mp4 clip5.mp4", encoding="utf-8")
     (root / "list-pl.txt").write_text("/slow/big.mp4 /slow/clip6.mp4 /slow/clip7.mp4", encoding="utf-8")
+    # a video with 3 chapters (tools: split by chapters)
+    (root / "chapters.txt").write_text(";FFMETADATA1\n" + "".join(
+        f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={i * 4000}\nEND={(i + 1) * 4000}\ntitle=Part {i + 1}\n" for i in range(3)),
+        encoding="utf-8")
+    sh(ff, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25", "-f", "lavfi",
+       "-i", "sine=frequency=500", "-i", str(root / "chapters.txt"), "-map_metadata", "2", "-map", "0:v", "-map", "1:a",
+       "-t", "12", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(root / "chaptered.mp4"))
+    # a page with a video and an English subtitle track (subtitles)
+    (root / "subs.vtt").write_text("WEBVTT\n\n00:00:00.500 --> 00:00:03.000\nHello subtitles\n\n"
+                                   "00:00:03.500 --> 00:00:06.000\nSecond line\n", encoding="utf-8")
+    (root / "subpage.html").write_text('<html><head><title>Subtitle page</title></head><body><video controls>'
+                                       '<source src="/files/clip.mp4" type="video/mp4">'
+                                       '<track kind="subtitles" srclang="en" label="English" src="/files/subs.vtt">'
+                                       '</video></body></html>', encoding="utf-8")
     (root / "nomedia.html").write_text("<html><head><title>No media here</title></head><body><p>Just text.</p></body></html>",
                                        encoding="utf-8")
     (root / "live").mkdir()
@@ -81,8 +96,9 @@ def wait_url(url, secs=40):
 
 
 class App:
-    def __init__(self, home):
+    def __init__(self, home, extra_env=None):
         env = os.environ.copy()
+        env.update(extra_env or {})
         env.update(HOME=str(home), USERPROFILE=str(home), MD_PORT=str(APP_PORT), MD_NO_WINDOW="1", MD_NO_BROWSER="1",
                    NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
         self.log = open(home / "app.log", "w")
@@ -311,6 +327,242 @@ def run_26_tests(app, home, tmp):
         time.sleep(2)
 
 
+def ffinfo(fp):
+    return subprocess.run([shutil.which("ffprobe") or "ffprobe", "-v", "error", "-show_entries",
+                           "stream=codec_type,height", "-of", "json", fp], capture_output=True, text=True).stdout
+
+
+def run_27_tests(tmp):
+    """2.7: tools, after-download, subtitles, speed limit, scheduling, templates, notifications, preview,
+    clipboard, phone, backup, self-update, English messages."""
+    home = tmp / "home27"
+    home.mkdir()
+    clip_file = tmp / "clipboard.txt"
+    clip_file.write_text("nothing yet", encoding="utf-8")
+    site = tmp / "site"
+    app = App(home, {"MO_CLIP_FILE": str(clip_file), "MD_PHONE_PORT": "8977"})
+    out = home / "Downloads" / "MO Downloader"
+    log = lambda: (home / "app.log").read_text(errors="replace")  # noqa: E731
+    try:
+        # --- tools on a file already on disk
+        src = out / "source big.mp4"
+        out.mkdir(parents=True, exist_ok=True)
+        shutil.copy(site / "big.mp4", src)
+        before = src.stat().st_size
+        j = app.wait(app.api("/api/tool", {"tool": "compress", "input": str(src), "target_mb": 1})["id"])
+        size = os.path.getsize(j["file"]) if j.get("file") and os.path.exists(j["file"]) else 0
+        check("tools: compress to a set size", j["status"] == "done" and 0 < size <= 1.1 * 1048576 and duration(j["file"]) > 9,
+              f"{j['status']} · {before} → {size} bytes · {(j.get('error') or '')[:120]}")
+        check("tools: the original file is not changed", src.stat().st_size == before, "")
+        j = app.wait(app.api("/api/tool", {"tool": "resize", "input": str(src), "height": 360})["id"])
+        check("tools: change resolution", j["status"] == "done" and '"height": 360' in ffinfo(j["file"]), (j.get("error") or "")[:120])
+        j = app.wait(app.api("/api/tool", {"tool": "preset", "input": str(src), "preset": "mobile"})["id"])
+        check("tools: ready-made target (phone)", j["status"] == "done" and '"height": 720' in ffinfo(j["file"]), (j.get("error") or "")[:120])
+        j = app.wait(app.api("/api/tool", {"tool": "audio", "input": str(src), "format": "mp3"})["id"])
+        check("tools: extract audio", j["status"] == "done" and j["file"].endswith(".mp3") and '"video"' not in ffinfo(j["file"]),
+              (j.get("error") or "")[:120])
+        ch = out / "chaptered.mp4"
+        shutil.copy(site / "chaptered.mp4", ch)
+        pr = app.api("/api/probe", {"path": str(ch)})
+        check("tools: chapters read from the file", len(pr.get("chapters") or []) == 3, str(pr)[:150])
+        j = app.wait(app.api("/api/tool", {"tool": "chapters", "input": str(ch)})["id"])
+        parts = sorted((out / "chaptered - chapters").glob("*.mp4")) if (out / "chaptered - chapters").exists() else []
+        check("tools: split by chapters", j["status"] == "done" and len(parts) == 3 and all(3 < duration(str(x)) < 5.5 for x in parts),
+              f"{j['status']} · {[x.name for x in parts]}")
+        r = app.api("/api/tool", {"tool": "compress", "input": str(out / "missing.mp4"), "target_mb": 5})
+        check("tools: a missing file is refused with a reason", "غير موجود" in (r.get("error") or ""), str(r))
+
+        # --- split by chapters while downloading
+        j = app.wait(app.api("/api/download", {"url": SITE + "/files/chaptered.mp4", "mode": "preset", "preset": "best",
+                                               "split_chapters": True})["id"])
+        parts = sorted(Path(j["outdir"]).rglob("* - chapters/*.mp4")) if j.get("outdir") else []
+        check("download: split by chapters", j["status"] == "done" and len(parts) == 3 and all(3.5 < duration(str(x)) < 4.6 for x in parts),
+              f"{j['status']} · {[(x.name, round(duration(str(x)), 1)) for x in parts]}")
+
+        # --- after download: convert automatically
+        jid = app.api("/api/download", {"url": SITE + "/files/clip3.mp4", "mode": "preset", "preset": "best",
+                                        "after": {"tool": "audio", "format": "m4a"}})["id"]
+        app.wait(jid)
+        time.sleep(1)
+        conv = [x for x in app.api("/api/jobs")["jobs"] if x.get("source") == "tool" and x.get("source_label") == "بعد التنزيل"]
+        c = app.wait(conv[0]["id"]) if conv else {}
+        check("after download: converted automatically", c.get("status") == "done" and (c.get("file") or "").endswith(".m4a"),
+              f"{c.get('status')} · {c.get('file')}")
+
+        # --- subtitles: language, separate file, embedded, the 3D tool
+        tool = tmp / "fake3d.py"
+        tool.write_text("import sys, pathlib\np = pathlib.Path(sys.argv[1])\n"
+                        "p.with_suffix('.3d.ass').write_text('[Script Info]\\n' + p.read_text(encoding='utf-8'), encoding='utf-8')\n")
+        app.api("/api/settings", {"sub3d_cmd": f'"{sys.executable}" "{tool}" {{file}}'})
+        j = app.wait(app.api("/api/download", {"url": SITE + "/files/subpage.html", "mode": "preset", "preset": "best",
+                                               "subs": True, "sub_langs": "en", "sub_mode": "both", "sub3d": True})["id"])
+        srts = list(Path(j["outdir"]).glob("*.en.srt")) if j.get("outdir") else []
+        ass = list(Path(j["outdir"]).glob("*.3d.ass")) if j.get("outdir") else []
+        check("subtitles: saved as a separate .srt file", j["status"] == "done" and srts and "Hello subtitles" in srts[0].read_text(),
+              f"{j['status']} · {[x.name for x in srts]} · {(j.get('error') or '')[:120]}")
+        check("subtitles: embedded in the video", j.get("file") and '"subtitle"' in ffinfo(j["file"]), "")
+        check("subtitles: the 3D subtitle tool ran on the .srt", bool(ass), str([x.name for x in ass]))
+
+        # --- speed limit
+        app.api("/api/settings", {"rate_limit_kb": 150})
+        t0 = time.time()
+        j = app.wait(app.api("/api/download", {"url": SITE + "/files/big.mp4?limit", "mode": "preset", "preset": "best",
+                                               "title": "limited"})["id"], 180)
+        took = time.time() - t0
+        size = os.path.getsize(j["file"]) if j.get("file") else 0
+        app.api("/api/settings", {"rate_limit_kb": 0})
+        check("speed limit respected", j["status"] == "done" and took >= size / (150 * 1024) * 0.8,
+              f"{size} bytes in {took:.1f}s (limit 150 KB/s → at least {size / 153600:.1f}s)")
+
+        # --- start at a set time
+        at = time.time() + 8
+        jid = app.api("/api/download", {"url": SITE + "/files/clip4.mp4", "mode": "preset", "preset": "best", "start_at": at})["id"]
+        time.sleep(3)
+        early = app.job(jid)
+        j = app.wait(jid, 60)
+        check("scheduled download waits for its time", early["status"] == "queued" and "مجدول" in early["stage"]
+              and j["status"] == "done" and j.get("started", at) >= at - 1,
+              f"{early['status']} · {early['stage']} → {j['status']}")
+
+        # --- file name and folder templates
+        bad = app.api("/api/settings", {"name_tpl": "{uploader}"})
+        check("template without {title} or {id} refused", "{title}" in (bad.get("error") or ""), str(bad)[:120])
+        app.api("/api/settings", {"name_tpl": "{site} - {title}", "folder_tpl": "{site}/test-{year}"})
+        j = app.wait(app.api("/api/download", {"url": SITE + "/files/clip5.mp4", "mode": "preset", "preset": "best"})["id"])
+        rel = os.path.relpath(j.get("file") or "", out)
+        app.api("/api/settings", {"name_tpl": "", "folder_tpl": ""})
+        check("file name and folder templates applied", j["status"] == "done" and re.match(r"Generic[\\/]test-[^\\/]+[\\/]Generic - clip5", rel),
+              rel)
+
+        # --- notifications
+        check("notification sent when a download finishes", "[notify]" in log() and "clip5" in log(), "")
+
+        # --- preview inside the window
+        f = j["file"]
+        q = urllib.parse.urlencode({"t": app.token, "path": f})
+        r = OPENER.open(urllib.request.Request(f"{app.base}/api/media?{q}", headers={"Range": "bytes=0-99"}))
+        check("preview: file served in parts (seeking works)", r.status == 206 and len(r.read()) == 100
+              and r.headers.get("Content-Type") == "video/mp4", f"{r.status} {r.headers.get('Content-Range')}")
+        outside = tmp / "secret.mp4"
+        outside.write_bytes(b"x" * 10)
+        try:
+            code = OPENER.open(f"{app.base}/api/media?" + urllib.parse.urlencode({"t": app.token, "path": str(outside)})).status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        try:
+            code2 = OPENER.open(f"{app.base}/api/media?" + urllib.parse.urlencode({"t": "wrong", "path": f})).status
+        except urllib.error.HTTPError as e:
+            code2 = e.code
+        check("preview: other files and a wrong token are refused", code == 403 and code2 == 403, f"{code} {code2}")
+
+        # --- clipboard
+        app.api("/api/settings", {"clipboard": True})
+        time.sleep(2)
+        clip_file.write_text(SITE + "/files/clip6.mp4", encoding="utf-8")
+        sug = None
+        for _ in range(20):
+            sug = app.api("/api/clip").get("clip")
+            if sug:
+                break
+            time.sleep(0.5)
+        clip_file.write_text("just some text", encoding="utf-8")
+        time.sleep(2)
+        app.api("/api/clip_dismiss", {})
+        clip_file.write_text("https://example.com/about-us", encoding="utf-8")
+        time.sleep(3)
+        check("clipboard: a copied video link is suggested", (sug or {}).get("url") == SITE + "/files/clip6.mp4", str(sug))
+        check("clipboard: plain text and ordinary pages are not suggested", app.api("/api/clip").get("clip") is None, "")
+        app.api("/api/settings", {"clipboard": False})
+
+        # --- links from a phone
+        r = app.api("/api/settings", {"phone": True})
+        check("phone: needs a password first", "كلمة مرور" in (r.get("error") or ""), str(r)[:100])
+        app.api("/api/settings", {"phone": True, "phone_pin": "4321"})
+        ph = app.api("/api/phone", {})
+        key = re.search(r"k=([^&]+)", ph.get("url", "")).group(1) if "k=" in ph.get("url", "") else ""
+        port = int(re.search(r":(\d+)/m", ph.get("url", ":0/m")).group(1))
+        check("phone: listening, with a QR code", ph.get("on") and key and "<svg" in (ph.get("svg") or ""), ph.get("url", "")[:80])
+        page = OPENER.open(f"http://127.0.0.1:{port}/m?k={key}").read().decode()
+
+        def send(pin, k=key):
+            rq = urllib.request.Request(f"http://127.0.0.1:{port}/m/add", data=json.dumps(
+                {"k": k, "pin": pin, "url": SITE + "/files/clip7.mp4", "preset": "best"}).encode(),
+                headers={"Content-Type": "application/json"})
+            try:
+                return OPENER.open(rq).status
+            except urllib.error.HTTPError as e:
+                return e.code
+        try:
+            nokey = OPENER.open(f"http://127.0.0.1:{port}/m?k=wrong").status
+        except urllib.error.HTTPError as e:
+            nokey = e.code
+        check("phone: page opens only with the code from the QR", "MO Downloader" in page and nokey == 404, str(nokey))
+        wrong, right = send("0000"), send("4321")
+        time.sleep(1)
+        got = [x for x in app.api("/api/jobs")["jobs"] if x.get("source") == "phone"]
+        check("phone: wrong password refused, right one starts the download", wrong == 403 and right == 200 and len(got) == 1,
+              f"{wrong} {right} · {len(got)} job(s)")
+        codes = [send("1111") for _ in range(6)]
+        check("phone: too many wrong passwords → locked for a while", codes[-1] == 429 and send("4321") == 429, str(codes))
+        app.api("/api/settings", {"phone": False})
+        time.sleep(1)
+        try:
+            OPENER.open(f"http://127.0.0.1:{port}/m?k={key}", timeout=3)
+            stopped = False
+        except Exception:
+            stopped = True
+        check("phone: turning it off stops listening", stopped, "")
+
+        # --- backup: export and import
+        app.api("/api/subs/add", {"url": SITE + "/list/ch.html", "start": "new", "preset": "best"})
+        ex = app.api("/api/export", {})
+        data = json.loads(Path(ex["file"]).read_text(encoding="utf-8"))
+        check("backup: exported settings, channels and history", ex.get("ok") and data["subs"] and len(data["history"]) >= 5
+              and "phone_key" not in data["settings"], f"{ex.get('history')} history · {ex.get('subs')} channels")
+        h = app.api("/api/history?limit=1")["items"][0]
+        app.api("/api/history/delete", {"key": h.get("key"), "date": h.get("date")})
+        app.api("/api/subs/delete", {"id": app.api("/api/subs")["subs"][0]["id"]})
+        r = app.api("/api/import", {"data": data, "parts": ["history", "subs"]})
+        check("backup: import restores what was removed and skips what is there", r.get("history") == 1 and r.get("subs") == 1, str(r))
+        r = app.api("/api/import", {"data": {"hello": 1}, "parts": ["settings"]})
+        check("backup: a file that isn't a backup is refused", "نسخة احتياطية" in (r.get("error") or ""), str(r)[:100])
+
+        # --- updating the app itself (a local stand-in for the releases page)
+        def wait_update():
+            for _ in range(60):
+                u = app.api("/api/status")["update"]
+                if u.get("state") not in ("checking", "downloading", ""):
+                    return u
+                time.sleep(0.5)
+            return app.api("/api/status")["update"]
+        app.api("/api/settings", {"update_url": SITE + "/release/old.json"})
+        app.api("/api/update_check", {})
+        u = wait_update()
+        check("update: says when this is the latest version", u.get("state") == "current", u.get("msg"))
+        app.api("/api/settings", {"update_url": SITE + "/release/bad.json"})
+        app.api("/api/update_check", {})
+        u = wait_update()
+        check("update: a file whose fingerprint doesn't match is rejected", u.get("state") == "error" and "البصمة" in (u.get("msg") or ""),
+              u.get("msg"))
+        app.api("/api/settings", {"update_url": SITE + "/release/new.json"})
+        app.api("/api/update_check", {})
+        u = wait_update()
+        upd = home / ".media_downloader" / "updates" / "MO-Downloader-9.9.zip"
+        check("update: a newer version is downloaded and checked", u.get("state") == "ready" and u.get("latest") == "9.9"
+              and upd.exists() and upd.read_bytes() == (site / "clip.mp4").read_bytes(), u.get("msg"))
+
+        # --- English messages
+        app.api("/api/settings", {"lang": "en"})
+        page = OPENER.open(app.base + "/").read().decode()
+        j = app.wait(app.api("/api/download", {"url": SITE + "/files/clip2.mp4", "mode": "preset", "preset": "720"})["id"])
+        time.sleep(0.5)
+        check("English: the page starts in English", 'const LANG = "en"' in page, "")
+        check("English: notifications in English", "[notify] Download finished ✓" in log(), log().strip().splitlines()[-1][:120])
+        app.api("/api/settings", {"lang": "ar"})
+    finally:
+        app.stop()
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="mo-tests-"))
     site_root, home = tmp / "site", tmp / "home"
@@ -399,6 +651,7 @@ def main():
               json.dumps(t, ensure_ascii=False)[:200])
 
         run_26_tests(app, home, tmp)
+        run_27_tests(tmp)
 
         if NETWORK:
             # 8) a public image album: the first engine finds nothing, the gallery engine downloads the files

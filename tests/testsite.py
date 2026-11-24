@@ -63,6 +63,21 @@ class H(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/proxy-count":
             return self.deny(200, str(PROXY_HITS[0]))
+        if path.startswith("/release/"):  # a stand-in for GitHub's "latest release" answer (self-update test)
+            import hashlib, json
+            kind = path[len("/release/"):].replace(".json", "")
+            data = open(os.path.join(ROOT, "clip.mp4"), "rb").read()
+            digest = hashlib.sha256(data).hexdigest() if kind != "bad" else "0" * 64
+            rel = {"tag_name": "v1.0" if kind == "old" else "v9.9", "html_url": "http://127.0.0.1/release",
+                   "body": "test release", "assets": [{"name": "MO-Downloader-9.9.zip", "size": len(data),
+                   "digest": "sha256:" + digest,
+                   "browser_download_url": f"http://127.0.0.1:{self.server.server_address[1]}/files/clip.mp4"}]}
+            body = json.dumps(rel).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if path == "/slow-count":
             import json
             return self.deny(200, json.dumps(SLOW_HITS))
@@ -119,7 +134,7 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
         ext = os.path.splitext(fp)[1].lower()
         ctype = {".mp4": "video/mp4", ".m3u8": "application/vnd.apple.mpegurl", ".ts": "video/mp2t",
-                 ".html": "text/html; charset=utf-8", ".jpg": "image/jpeg", ".png": "image/png"}.get(ext, "application/octet-stream")
+                 ".html": "text/html; charset=utf-8", ".jpg": "image/jpeg", ".png": "image/png", ".vtt": "text/vtt; charset=utf-8"}.get(ext, "application/octet-stream")
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))

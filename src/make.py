@@ -14,6 +14,12 @@ code = (src / "server.py").read_text(encoding="utf-8")
 code, n = re.subn(r'^APP_VERSION = "[^"]*"', f'APP_VERSION = "{version}"', code, count=1, flags=re.M)
 assert n == 1, "APP_VERSION line not found"
 code = code.replace("__LOGO_B64__", base64.b64encode((src / "logo128.png").read_bytes()).decode(), 1)
+import json
+i18n = json.loads((src / "i18n_en.json").read_text(encoding="utf-8")) if (src / "i18n_en.json").exists() else {}
+i18n_txt = json.dumps(i18n, ensure_ascii=False, separators=(",", ":"))
+assert '"""' not in i18n_txt
+page = page.replace("/*__I18N__*/{}", i18n_txt, 1)
+code = code.replace('json.loads(r"""__I18N__""")', "json.loads(" + repr(i18n_txt) + ")", 1)
 code = code.replace('r"""__PAGE__"""', 'r"""' + page + '"""', 1)
 out = Path(sys.argv[1])
 out.write_text(code, encoding="utf-8")

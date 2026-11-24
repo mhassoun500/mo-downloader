@@ -122,6 +122,11 @@ jobs:
           grep -q "tray=OK" "$MO_SELFTEST" || { echo "no menu-bar icon"; tail -40 ~/.media_downloader/log.txt; exit 1; }
           grep -q "reopen=OK" "$MO_SELFTEST" || { echo "clicking the Dock icon did not bring the window back"; exit 1; }
 
+      - name: Opening files, replacing the Python version, shortcuts (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python tests/win_open_test.py "build-tmp/dist/MO Downloader/MO Downloader.exe"
+
       - name: Browser helper (native messaging) answers and starts the app
         shell: bash
         run: |

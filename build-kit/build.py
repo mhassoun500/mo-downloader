@@ -42,7 +42,7 @@ def app_version():
 def main():
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet", "pip")
     run(sys.executable, "-m", "pip", "install", "-U", "--quiet",
-        "pyinstaller", "yt-dlp[default,curl-cffi]", "yt-dlp-ejs", "gallery-dl", "imageio-ffmpeg", "deno", "certifi", "pywebview",
+        "pyinstaller", "yt-dlp[default,curl-cffi]", "yt-dlp-ejs", "gallery-dl", "segno", "imageio-ffmpeg", "deno", "certifi", "pywebview",
         *(["pystray", "pillow"] if SYSTEM == "Windows" else []))
     import importlib.metadata as md
     import deno as deno_pkg
@@ -77,7 +77,7 @@ def main():
         "--add-data", f"{WORK / 'engine_version.json'}{os.pathsep}.",
         "--add-data", f"{ROOT / 'browser-extension'}{os.pathsep}browser-extension",
         "--collect-all", "yt_dlp_ejs", "--collect-all", "imageio_ffmpeg",
-        "--collect-all", "gallery_dl", "--collect-all", "curl_cffi",
+        "--collect-all", "gallery_dl", "--collect-all", "curl_cffi", "--hidden-import", "segno",
         "--add-binary", f"{deno_bin}{os.pathsep}deno_bin",
         "--collect-data", "certifi", "--hidden-import", "certifi",
         "--hidden-import", "tkinter", "--hidden-import", "tkinter.filedialog",

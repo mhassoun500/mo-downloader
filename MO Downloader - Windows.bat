@@ -2,6 +2,13 @@
 title MO Downloader
 cd /d "%~dp0"
 
+rem --- the installed app (MO-Downloader-X.Y-Setup.exe) is preferred: open it instead, and leave its shortcuts alone
+set "MO_EXE=%LOCALAPPDATA%\Programs\MO Downloader\MO Downloader.exe"
+if exist "%MO_EXE%" if /i not "%MO_FORCE_PYTHON%"=="1" (
+  start "" "%MO_EXE%" %*
+  exit /b 0
+)
+
 where python >nul 2>nul
 if errorlevel 1 (
   echo.
@@ -34,7 +41,7 @@ rem --- first run only: install what is missing. The app itself keeps the engine
 python -c "import yt_dlp, gallery_dl, curl_cffi, imageio_ffmpeg, deno, webview, pystray, PIL" >nul 2>nul
 if errorlevel 1 (
   echo Installing the download engine ^(yt-dlp, gallery-dl, ffmpeg, Deno^)... first run only, please wait.
-  python -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl imageio-ffmpeg deno pywebview pystray pillow
+  python -m pip install -U --quiet --disable-pip-version-check "yt-dlp[default,curl-cffi]" gallery-dl segno imageio-ffmpeg deno pywebview pystray pillow
 )
 
 python "%~dp0app\mo_downloader.py" %*
