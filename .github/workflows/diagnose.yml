@@ -1,0 +1,24 @@
+# Installs a released Windows build on a GitHub Windows machine and checks icons and opening files.
+name: Diagnose Windows release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test"
+        default: "v2.6"
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and install the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p "*Setup.exe" -D "$env:RUNNER_TEMP"
+          $s = Get-ChildItem "$env:RUNNER_TEMP\*Setup.exe" | Select-Object -First 1
+          Start-Process $s.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon" -Wait
+      - run: python tests/win_diagnose.py
