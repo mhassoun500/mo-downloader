@@ -36,7 +36,7 @@
 
 ```
 VERSION                    رقم الإصدار (المصدر الوحيد)
-src/server.py              الخادم والمنطق كله (Python، ~2900 سطر)
+src/server.py              الخادم والمنطق كله (Python، ~3200 سطر)
 src/page.html              الواجهة (HTML/JS/CSS في ملف واحد)
 src/logo128.png            الشعار
 src/make.py                يجمع الثلاثة في ملف واحد app/mo_downloader.py ويكتب الإصدار في Info.plist واقرأني
