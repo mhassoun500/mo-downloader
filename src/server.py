@@ -202,6 +202,7 @@ DEFAULT_SETTINGS = {
     "update_url": "https://api.github.com/repos/mhassoun500/mo-downloader/releases/latest",
     "update_checked": 0,
     "auto_update": True,        # install a downloaded update by itself as soon as nothing is downloading
+    "last_update": None,        # the last update installed from inside the app: {from, to, auto, date}
 }
 SETTINGS = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
 SETTINGS_LOCK = threading.Lock()
@@ -2609,6 +2610,8 @@ def update_install(auto=False):
     log(f"[update] installing {tag} ({'automatic' if auto else 'by the user'}): {Path(f).name}")
     save_queue()
     UPDATE.update(state="installing", msg=f"جارٍ تثبيت الإصدار {tag}…")
+    SETTINGS["last_update"] = {"from": APP_VERSION, "to": tag, "auto": bool(auto), "date": time.time()}
+    save_settings()
     try:
         if f.endswith(".exe"):
             # the installer closes this app, replaces it and opens it again (/RELAUNCH=1)

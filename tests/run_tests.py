@@ -583,6 +583,13 @@ def run_27_tests(tmp):
               f"{new} · port {port} → {newport} · old process exit {old.proc.poll()}")
         check("automatic update: back on the same port", newport == port, f"{port} → {newport}")
         try:
+            t9 = re.search(r'const TOKEN = "([^"]+)"', OPENER.open(f"http://127.0.0.1:{newport}/").read().decode()).group(1)
+            lu = json.loads(OPENER.open(urllib.request.Request(f"http://127.0.0.1:{newport}/api/status",
+                            headers={"X-Token": t9})).read())["settings"].get("last_update") or {}
+        except Exception as e:
+            lu = {"error": str(e)}
+        check("automatic update: recorded (from → to, automatic)", lu.get("to") == "9.9" and lu.get("auto") is True, str(lu))
+        try:
             tok = re.search(r'const TOKEN = "([^"]+)"', OPENER.open(f"http://127.0.0.1:{newport}/").read().decode()).group(1)
             OPENER.open(urllib.request.Request(f"http://127.0.0.1:{newport}/api/shutdown", data=b"{}",
                         headers={"X-Token": tok, "Content-Type": "application/json"}), timeout=5)

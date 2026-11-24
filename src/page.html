@@ -1187,7 +1187,9 @@ $("impFile").onchange = async () => {
 // ---------- app update
 function updUI(u) {
   u = u || {};
-  $("updMsg").textContent = u.msg || ("الإصدار الحالي " + (S.status ? S.status.app : ""));
+  const lu = S.settings && S.settings.last_update;
+  $("updMsg").textContent = u.msg || ("الإصدار الحالي " + (S.status ? S.status.app : "") +
+    (lu && lu.to ? " · آخر تحديث: من " + lu.from + " إلى " + lu.to + (lu.auto ? " (تلقائياً)" : "") : ""));
   $("updInstall").classList.toggle("hidden", u.state !== "ready");
   $("updCheck").disabled = ["checking", "downloading", "installing"].includes(u.state);
   if (["checking", "downloading", "installing"].includes(u.state)) setTimeout(loadStatus, 1500);

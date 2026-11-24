@@ -99,8 +99,9 @@ if WIN:
     r = subprocess.run([str(PKG), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], timeout=600)
     exe = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "MO Downloader" / "MO Downloader.exe"
     check("installed with the real installer", r.returncode == 0 and exe.exists(), str(exe))
-    marker = exe.parent / "old-copy-marker.txt"
-    marker.write_text("x")
+    # the installer rewrites its uninstall record on every install: proof that it ran again
+    record = exe.parent / "unins000.dat"
+    record_before = record.stat().st_mtime if record.exists() else 0
     cmd = [str(exe), "--background"]
 else:
     src = Path(sys.argv[2]).resolve()
@@ -135,10 +136,21 @@ check("app found version 9.9, downloaded it and closed to install it", went and 
       f"downloads served: {SERVED['downloads']}")
 back = wait(find_app, 300)
 check("app opened again by itself after the update", back, str(back))
-check("the old copy was replaced", not marker.exists(), str(marker))
+if WIN:
+    after = record.stat().st_mtime if record.exists() else 0
+    check("the installer ran again (silently)", after > record_before, f"{record_before} → {after}")
+else:
+    check("the old copy was replaced by the one in the .dmg", not marker.exists(), str(marker))
 log = log_file.read_text(errors="replace") if log_file.exists() else ""
-check("update installed automatically (log)", "[update] installing 9.9 (automatic)" in log,
-      "\n".join(x for x in log.splitlines() if "[update]" in x)[-300:])
+last = {}
+if back:
+    try:
+        b2 = f"http://127.0.0.1:{back}"
+        t2 = re.search(r'const TOKEN = "([^"]+)"', O.open(b2 + "/").read().decode()).group(1)
+        last = json.loads(O.open(urllib.request.Request(b2 + "/api/status", headers={"X-Token": t2})).read())["settings"].get("last_update") or {}
+    except Exception as e:
+        last = {"error": str(e)}
+check("the app records that it installed 9.9 by itself", last.get("to") == "9.9" and last.get("auto") is True, str(last))
 if not WIN:
     check("the new copy is not blocked by macOS (no quarantine mark)",
           "com.apple.quarantine" not in subprocess.run(["xattr", str(bundle)], capture_output=True, text=True).stdout, "")

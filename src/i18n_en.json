@@ -1,4 +1,5 @@
 {
+ "(تلقائياً)": "(automatically)",
  "(تُخطّي": "(skipped",
  "(في Edge:": "(in Edge:",
  "(مسرّع)": "(accelerated)",
@@ -25,6 +26,7 @@
  "MP4 (الأكثر توافقاً)": "MP4 (most compatible)",
  "ffmpeg غير موجود": "ffmpeg missing",
  "http://host:port أو socks5://user:pass@host:port": "http://host:port or socks5://user:pass@host:port",
+ "· آخر تحديث: من": "· last update: from",
  "· الإعدادات": "· settings",
  "· السجل:": "· history:",
  "· القنوات:": "· channels:",
